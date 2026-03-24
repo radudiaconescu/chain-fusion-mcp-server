@@ -1,325 +1,787 @@
 # Architecture Decision Record
 
-This document captures the key design decisions made during the initial planning and
-engineering review of the Chain Fusion MCP server, with the rationale behind each choice
-and the tradeoffs that were explicitly accepted.
+This document captures every significant design decision made during the planning and
+engineering review of the Chain Fusion MCP server. For each decision the full option space
+that was considered is documented alongside the reasoning for the chosen approach and the
+tradeoffs that were explicitly accepted.
 
 ---
 
-## 1. Scope: greenfield expansion
+## 1. Scope: greenfield multi-chain expansion
 
-**Decision:** Build a full multi-chain read + write MCP server from scratch rather than
-wrapping an existing library or limiting scope to a single chain.
+**Decision:** Build a full multi-chain read + write MCP server from scratch, covering
+Bitcoin, Ethereum, and ICP ckTokens, including transaction broadcast tools.
 
-**Why:** This is a greenfield project with no legacy code to preserve. Limiting scope to
-reads-only or a single chain would make the server useful only for demos. The core value
-proposition — Claude as a first-class multi-chain participant without custodians — requires
-at minimum Bitcoin, Ethereum, and ICP ckToken coverage to demonstrate the Chain Fusion
-concept end-to-end. Write tools (broadcast) were included because Claude constructing
-transactions and being unable to submit them is a dead end.
+### Options considered
+
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — Reads only | Balance and UTXO reads, no write tools | Rejected |
+| B — Single chain (BTC only) | Start narrow, expand later | Rejected |
+| **C — Multi-chain reads + broadcast** | **Bitcoin + ETH + ckTokens, broadcast pre-signed txs** | **Chosen** |
+| D — Full signing | Includes key generation and transaction construction | Deferred |
+
+**Why C:** The core value proposition is Claude as a multi-chain participant without
+custodians. A reads-only server is useful only as a demo — Claude can read balances but
+cannot act on them. A single-chain server fails to demonstrate Chain Fusion, which is
+specifically ICP's cross-chain story. Broadcasting pre-signed transactions was included
+because the alternative (Claude constructs a transaction then can't submit it) is a dead
+end that forces a copy-paste step outside the AI workflow.
+
+**Why not D:** Transaction signing requires key management (generating, storing, and
+protecting private keys) inside the MCP server. That is a substantial security engineering
+problem that deserves its own design pass. ICP's t-ECDSA integration (threshold signing
+without a private key on any single machine) is the right long-term answer, but it has
+open failure modes (the 30s timeout gap) that aren't safe to ship yet. Signing is tracked
+as a P1 follow-up.
 
 **Tradeoffs accepted:**
-- Larger initial surface area means more things that can be wrong before production hardening
-- Three distinct chain ecosystems (Bitcoin/Mempool, EVM/JSON-RPC, ICP/agent) increase
-  dependency footprint and maintenance burden
-- Deferred: key generation, transaction signing, ICRC-2 transfers, arbitrary canister calls
+- Three distinct chain ecosystems increase the dependency footprint and ongoing maintenance
+  surface relative to a single-chain server
+- More things can go wrong before production hardening is complete
+- Deferred: transaction construction, key generation, ICRC-2 transfers, arbitrary canister calls
 
 ---
 
 ## 2. Stack: TypeScript / Node.js
 
-**Decision:** TypeScript on Node.js using `@modelcontextprotocol/sdk` for MCP and
-`@dfinity/agent` + `@dfinity/ledger-icrc` for ICP.
+**Decision:** TypeScript on Node.js, `"type": "module"` (ESM), using
+`@modelcontextprotocol/sdk`, `@dfinity/agent`, and `@dfinity/ledger-icrc`.
 
-**Why:**
-- The MCP SDK and all Dfinity JS packages are first-class TypeScript — no bindings layer,
-  no generated stubs, types come from the source.
-- Node.js `crypto` module handles PKCS8 PEM parsing natively (no native addons, no WASM).
-- ESM-native: `"type": "module"` in `package.json` avoids the dual-module hazard and works
-  cleanly with Vitest's ESM test runner.
-- The alternative (Rust) would require writing an MCP server from scratch and either
-  compiling `wabt`/`candid` from source or calling out to external processes. Significant
-  added complexity for no functional benefit at this stage.
+### Options considered
+
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — Rust | Native binary, strong types, no GC | Rejected |
+| B — Python | Widely known, easy prototyping | Rejected |
+| C — Go | Fast startup, small binary | Rejected |
+| **D — TypeScript / Node.js (ESM)** | **First-class SDK support, native PEM parsing, ESM-native testing** | **Chosen** |
+
+**Why D:**
+
+- **SDK first-class support.** `@modelcontextprotocol/sdk`, `@dfinity/agent`,
+  `@dfinity/identity`, and `@dfinity/ledger-icrc` are all TypeScript-first packages.
+  Using any other language would require either REST shims, generated Candid bindings, or
+  calling out to a JS subprocess — adding a translation layer with no functional benefit.
+
+- **PEM parsing with no native addons.** Node.js's built-in `crypto.createPrivateKey()`
+  parses PKCS8 Ed25519 PEMs and exports JWK natively. No C extension, no WASM, no
+  `openssl` subprocess.
+
+- **ESM-native.** Setting `"type": "module"` in `package.json` and using `.js` extensions
+  in imports avoids the CommonJS/ESM dual-module hazard that plagues many Node.js packages.
+  It also allows Vitest to run tests without a Babel or `ts-jest` transform step.
+
+**Why not Rust:** The Rust MCP SDK is immature and the Dfinity Rust agent (`ic-agent`) has
+a significantly different API surface from the JS agent. Candid encoding for ICP calls
+would require writing or generating type-safe Rust bindings. The development cost is 3–4x
+higher for no user-visible benefit at this stage.
+
+**Why not Python:** The MCP Python SDK exists but the Dfinity Python bindings are
+unofficial and incomplete. Python also has no native PKCS8 PEM-to-raw-key extraction
+without `cryptography` or `openssl` subprocess calls.
+
+**Why not Go:** No official Dfinity Go SDK. Would require either a REST proxy to a JS
+process or hand-writing Candid encoding. Significantly higher implementation cost.
 
 ---
 
-## 3. ICP identity: PEM file (not hardware key or keystore)
+## 3. ICP identity: PKCS8 Ed25519 PEM file
 
 **Decision:** Identity is loaded from a PKCS8 Ed25519 PEM file at startup, as exported by
-`dfx identity export`.
+`dfx identity export <name>`. The key is parsed via Node.js `crypto` into an
+`Ed25519KeyIdentity` at process start.
 
-**Why:**
-- dfx exports Ed25519 PKCS8 PEM by default since v0.14. Every ICP developer already has
-  one. No new tooling required.
-- The PEM is parsed entirely via Node.js `createPrivateKey()` + JWK export — no dependency
-  on `@dfinity/identity-secp256k1` or native addons.
-- Alternative (HSM / hardware key): adds a hardware dependency and removes the ability to
-  run the server in CI or headless environments. Deferred.
-- Alternative (browser-based `AuthClient` / Internet Identity): requires a browser and
-  user interaction. Incompatible with a server process. Not applicable.
-- secp256k1 keys (older dfx identities) are intentionally unsupported in v0.1 — the
-  `@dfinity/identity-secp256k1` package is a separate install. The error message tells the
-  user exactly how to migrate.
+### Options considered
 
-**Implementation:** `createPrivateKey(pem)` → `export({ format: 'jwk' })` → read `d` field
-as base64url → `Ed25519KeyIdentity.fromSecretKey()`. See `src/identity.ts`.
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — Internet Identity / AuthClient | Browser-based wallet, no key file | Rejected |
+| B — Hardware key (YubiKey / HSM) | Maximum security, hardware-bound key | Deferred |
+| C — Encrypted keystore (password-protected) | Key stored on disk, encrypted at rest | Rejected |
+| D — Environment variable (raw hex secret) | Simple, no file required | Rejected |
+| **E — PKCS8 Ed25519 PEM (dfx default)** | **Matches dfx output, parseable natively, no extra deps** | **Chosen** |
+| F — secp256k1 PEM (legacy dfx) | Older dfx format, separate package required | Rejected |
+
+**Why E:**
+
+- dfx has exported Ed25519 PKCS8 PEM by default since v0.14 (2023). Every active ICP
+  developer already has one. The onboarding step is `dfx identity export <name> > identity.pem`
+  — a single command with no new tooling.
+- `createPrivateKey(pem).export({ format: 'jwk' })` extracts the 32-byte `d` field and
+  `Ed25519KeyIdentity.fromSecretKey()` accepts it directly. The entire parsing path is
+  four lines with no dependencies beyond Node.js stdlib and `@dfinity/identity`.
+- The PEM is a standard, well-understood format. It can be inspected with `openssl pkcs8`
+  if something goes wrong.
+
+**Why not A (Internet Identity):** AuthClient requires a browser window and user
+interaction for each session. An MCP server is a background process; it cannot open a
+browser or wait for human input mid-session.
+
+**Why not B (hardware key):** Hardware keys cannot run in CI, containers, or headless
+servers. The `dfinity/identity-hsm` package is not widely used. This is the right long-term
+answer for production with real funds, but adds a hardware dependency that blocks developer
+onboarding. Tracked as a future security hardening step.
+
+**Why not C (encrypted keystore):** Password-protected keystores require either an
+interactive password prompt (incompatible with headless startup) or a second secret to
+unlock the first (which just moves the problem). Adds complexity without changing the
+fundamental trust model for a local developer tool.
+
+**Why not D (env var):** Raw hex secrets in environment variables are one `printenv` or
+misconfigured log away from leaking. PEM files on disk can be `chmod 600`'d and kept out
+of shell history. They are the established ICP convention for good reason.
+
+**Why not F (secp256k1):** `@dfinity/identity-secp256k1` is a separate package not
+included in `@dfinity/identity`. Supporting it in v0.1 would add a dependency for a
+shrinking user segment (older dfx identities). The error message for a secp256k1 PEM
+explicitly tells the user to run `dfx identity new --storage-mode=plaintext <name>` to
+generate a compatible Ed25519 identity.
+
+**Implementation:** `createPrivateKey(pem)` → `export({ format: 'jwk' })` → base64url-decode
+`d` → `Ed25519KeyIdentity.fromSecretKey(ArrayBuffer)`. See `src/identity.ts:70–93`.
 
 ---
 
-## 4. Transport: both stdio and SSE
+## 4. Transport: stdio + SSE (both selectable)
 
-**Decision:** Support both `stdio` (Claude Desktop / `claude` CLI) and SSE (Express HTTP
-server) via `MCP_TRANSPORT=stdio|sse|both`.
+**Decision:** Support `stdio`, `sse`, and `both` via `MCP_TRANSPORT`. Default is `stdio`.
+SSE uses Express on a configurable port. The two transports are independently startable and
+can run simultaneously.
 
-**Why:**
-- `stdio` is the dominant transport for local Claude Desktop integrations — it is the
-  path of least friction for developers trying the server.
-- SSE is required for remote deployments (e.g., a server running on a VPS shared across
-  multiple Claude sessions). Without it, the server cannot be hosted.
-- The two transports are independent; running `both` simultaneously costs nothing but a
-  few extra file descriptors.
-- In `stdio` mode all log output goes to `stderr` (not `stdout`) so it does not corrupt
-  the MCP binary stream.
+### Options considered
 
-**Session management (SSE):** Each `GET /sse` connection creates a new `SSEServerTransport`
-keyed by `sessionId`. Messages are routed back via `POST /messages?sessionId=...`. This
-matches the MCP SDK's expected SSE session model and supports concurrent clients.
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — stdio only | Simple, no HTTP server | Rejected |
+| B — SSE only | Remote-capable, no stdin/stdout pipes | Rejected |
+| **C — Both, selectable at runtime** | **stdio for local, SSE for remote, `both` for testing** | **Chosen** |
+| D — WebSocket | Bidirectional, lower overhead than SSE | Rejected |
+| E — HTTP streaming (chunked transfer) | No EventSource client required | Rejected |
+
+**Why C:**
+
+- `stdio` is the path of least friction for Claude Desktop and the `claude` CLI. It
+  requires zero network configuration — the Claude process simply spawns the MCP server as
+  a child process and communicates over stdin/stdout.
+- SSE is required for any deployment where the server is not on the same machine as Claude
+  (VPS, Docker container, shared team server). Without it, the server cannot scale beyond
+  a single developer's laptop.
+- Running `both` simultaneously is useful during development (SSE for debugging with curl,
+  stdio for the actual Claude integration) and costs only a few extra file descriptors.
+- In `stdio` mode, all `console.error()` output goes to `stderr`, which is not part of the
+  MCP stream. `console.log()` is never used for logs to avoid corrupting the binary-framed
+  stdout.
+
+**Why not D (WebSocket):** The MCP SDK v1.x ships `SSEServerTransport` as the reference
+HTTP transport. WebSocket would require either a custom transport implementation or waiting
+for the SDK to add one. Unnecessary complexity for two routes.
+
+**Why not E (chunked HTTP):** SSE is better supported by the MCP SDK and has broader
+EventSource client compatibility (browser-native). Chunked transfer would require a custom
+client implementation.
+
+**SSE session model:** Each `GET /sse` creates a new `SSEServerTransport` keyed by
+`transport.sessionId`. Subsequent `POST /messages?sessionId=...` messages are routed to
+the correct transport. Concurrent clients are supported.
 
 ---
 
-## 5. Bitcoin reads via Mempool.space, not ICP management canister
+## 5. Bitcoin reads: Mempool.space REST API
 
 **Decision:** Bitcoin balance, UTXO, and fee rate reads use the Mempool.space public REST
-API rather than ICP's native `bitcoin_get_balance` / `bitcoin_get_utxos` management
-canister methods.
+API. The ICP management canister's native Bitcoin integration is not used for reads.
 
-**Why:** ICP's native Bitcoin methods are **update calls** — they go through full consensus
-and require the caller to attach cycles. An `HttpAgent` running outside a canister cannot
-attach cycles to a call. There is no mechanism for an external HTTP agent to fund an update
-call. Mempool.space provides the same data via free, low-latency REST endpoints and covers
-both mainnet and testnet. The `BTC_API_URL` override allows operators to point at a
-self-hosted Mempool instance if they need greater trust guarantees.
+### Options considered
 
-**Tradeoff:** Mempool.space data is not threshold-signed by ICP. A compromised Mempool API
-could return false balance or UTXO data. Acceptable for v0.1; production use should verify
-against an independent source before signing transactions.
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — ICP management canister (`bitcoin_get_balance`, `bitcoin_get_utxos`) | Native ICP, threshold-verified data | Rejected |
+| B — Bitcoin Core JSON-RPC | Self-hosted full node, maximum trust | Rejected |
+| C — Blockstream Esplora API | Similar to Mempool.space, good coverage | Rejected |
+| **D — Mempool.space REST API** | **Free, no auth, mainnet + testnet, configurable base URL** | **Chosen** |
+| E — Blockchain.info API | Old, rate-limited, no testnet | Rejected |
+
+**Why D:**
+
+ICP's native `bitcoin_get_balance` and `bitcoin_get_utxos` management canister methods are
+**update calls**, not query calls. Update calls go through BFT consensus across all
+subnet nodes and require the caller to attach cycles to pay for computation. An `HttpAgent`
+running outside a canister has no mechanism to attach cycles to an update call — cycles are
+a canister-level resource, not something an external HTTP client can provide. This makes
+the management canister's Bitcoin methods completely inaccessible from this server.
+
+Mempool.space provides identical data (confirmed/unconfirmed balances, UTXO set, fee rate
+tiers) via free, unauthenticated REST endpoints with typical latency under 200ms. It covers
+both mainnet (`mempool.space/api`) and testnet (`mempool.space/testnet/api`). The
+`BTC_API_URL` override allows operators to point at a self-hosted Mempool.space instance
+(which is open source) if they require greater trust guarantees.
+
+**Why not B (Bitcoin Core):** Requires the operator to run and sync a full node (>600 GB,
+weeks to sync). The server would become a full-node management tool rather than a Chain
+Fusion integration. Correct for production with real funds; wrong for developer onboarding.
+
+**Why not C (Esplora):** Blockstream's Esplora API and Mempool.space are functionally
+equivalent for our use case. Mempool.space was chosen because it is more actively
+maintained, has better fee rate data (more tier granularity), and has a more complete
+testnet endpoint. Both could be used interchangeably via `BTC_API_URL`.
+
+**Tradeoff explicitly accepted:** Mempool.space data is not threshold-signed by ICP nodes.
+A compromised Mempool.space response could return false balance or UTXO data. For read-only
+display this is an acceptable trust assumption. Before signing a transaction with Mempool
+UTXO data, a production system should cross-check against a second source.
 
 ---
 
-## 6. Ethereum reads via standard JSON-RPC
+## 6. Ethereum reads: direct JSON-RPC
 
 **Decision:** ETH tools call any operator-supplied `ETH_RPC_URL` directly (Infura, Alchemy,
-local node) rather than routing through ICP's EVM RPC canister.
+local node, Anvil). The ICP EVM RPC canister is not used as an intermediary.
 
-**Why:** The EVM RPC canister on ICP is useful when running *inside* a canister (where you
-cannot make outbound HTTP calls directly). From an external Node.js process, adding an ICP
-hop adds latency (ICP consensus round) and complexity (cycles, Candid encoding) with no
-benefit — the result is the same JSON-RPC response. Direct RPC is simpler, faster, and
-gives the operator full control over which node they trust.
+### Options considered
 
-**The EVM RPC canister is still relevant** for the embedded EVM error JSON detection:
-`ic-evm-rpc` occasionally returns EVM errors as JSON strings inside Candid text fields
-rather than in the standard `error` key. `extractEvmResult()` in `src/errors.ts` handles
-this pattern for forward compatibility.
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — ICP EVM RPC canister | Routes calls through ICP consensus, canister-verifiable | Rejected |
+| **B — Direct JSON-RPC to operator-supplied endpoint** | **Simpler, faster, operator controls trust** | **Chosen** |
+| C — ethers.js / viem provider abstraction | Higher-level library, hides raw RPC | Rejected |
+| D — Infura/Alchemy SDK | Vendor-specific, not portable | Rejected |
+
+**Why B:**
+
+The EVM RPC canister is designed for use *inside* ICP canisters — environments where
+outbound HTTP calls are impossible without going through ICP's HTTPS outcalls mechanism.
+From an external Node.js process that can make outbound HTTP calls directly, routing through
+the EVM RPC canister adds:
+- One full ICP consensus round (200–2000ms additional latency)
+- Candid encoding and decoding of the request and response
+- Cycles cost per call (the canister charges for outbound HTTPS calls)
+- An additional trust assumption (the EVM RPC canister's operator nodes)
+
+...for zero additional correctness. The JSON-RPC response from the Ethereum node is
+identical whether it arrives directly or relayed through ICP.
+
+**Why not C (ethers.js / viem):** Both are excellent for application-level Ethereum
+development but are heavyweight (ethers.js is 300+ KB). The server only needs four
+methods: `eth_getBalance`, `eth_call`, `eth_getTransactionByHash`, and
+`eth_sendRawTransaction`. A thin `ethRpc()` wrapper over `fetch` is 15 lines and adds no
+dependency. Adding ethers.js or viem would bring in ABI encoding, wallet management, and
+contract abstractions that are not used here.
+
+**Why not D (vendor SDK):** Ties the server to a specific provider. The generic JSON-RPC
+approach works with any EVM-compatible node (Infura, Alchemy, QuickNode, local Anvil/Hardhat,
+the ICP EVM RPC canister itself if desired).
+
+**Note on EVM RPC canister error format:** Despite not routing calls through it, the server
+still handles the EVM RPC canister's error format in `extractEvmResult()`. This canister
+sometimes returns EVM errors as JSON-encoded strings inside Candid text fields rather than
+in the JSON-RPC `error` key. The detection code is present for forward compatibility in
+case the server is later configured to route through the canister.
 
 ---
 
-## 7. ckToken balances via ICRC-1 query (free, uncertified)
+## 7. ckToken balances: ICRC-1 query call (not update, not HTTP)
 
 **Decision:** `cktoken_get_balance` uses `IcrcLedgerCanister.balance()` which issues an
-ICRC-1 `icrc1_balance_of` **query call** — not an update call.
+ICRC-1 `icrc1_balance_of` query call to the ICP ledger canister. Not an update call, not
+an HTTP REST endpoint.
 
-**Why:** Query calls on ICP run on a single replica, return in ~200ms, and cost no cycles
-from the caller. For balance reads this is the right tradeoff: the user gets a fast,
-cost-free result. The data is not certified by default (not signed by a threshold of
-replicas), but ICRC-1 ledger canisters are on the NNS-managed fiduciary subnet, which
-provides strong operational trust guarantees in practice.
+### Options considered
 
-**If certified reads are needed:** Fetch a certified response and verify the certificate
-against the IC root key. This is out of scope for v0.1.
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — ICRC-1 update call (`icrc1_balance_of` as update) | Certified result, costs cycles | Rejected |
+| **B — ICRC-1 query call (default)** | **Free, fast, uncertified** | **Chosen** |
+| C — ICP dashboard REST API | HTTP wrapper around ICP data, centralised | Rejected |
+| D — Certified query + certificate verification | Certified result, cryptographically verifiable | Deferred |
 
----
+**Why B:**
 
-## 8. Single shared HttpAgent at startup (not per-request)
+ICRC-1's `icrc1_balance_of` is intentionally defined as a query call in the standard. Query
+calls on ICP execute on a single replica, return in ~200ms, and cost the caller zero cycles.
+For a tool whose purpose is to tell Claude what a user's balance is, this is the right
+tradeoff. The ckToken ledger canisters (ckBTC, ckETH, ckUSDC) are all on the NNS-governed
+fiduciary subnet, which provides strong operational trust in practice — a malicious response
+from a single replica would be an extraordinary event.
 
-**Decision:** One `HttpAgent` instance is created at startup and shared across all tool
-invocations for the lifetime of the process.
+This is also the first tool in the server that makes a genuine ICP canister call. Unlike
+Bitcoin (Mempool.space) and Ethereum (direct RPC), `cktoken_get_balance` actually exercises
+the `@dfinity/agent` and `@dfinity/ledger-icrc` stack end-to-end. This is the Chain Fusion
+demonstration — a real on-chain ICP query call, no HTTP middleman.
 
-**Why:**
-- `HttpAgent` creation involves PEM parsing, JWK extraction, and (for non-mainnet) a
-  `fetchRootKey()` HTTP round-trip. Per-request agent creation would add 50–200ms to every
-  ICP tool call.
-- The agent holds no mutable request state between calls — it is safe to share across
-  concurrent tool invocations.
-- The agent's identity (the PEM-derived Ed25519 key) does not need to change during the
-  session.
+**Why not A (update call):** Update calls cost cycles, go through consensus, and take
+500ms–2s. For a balance read, this is unnecessary overhead. The ICRC-1 standard uses query
+calls for `icrc1_balance_of` precisely because balance reads don't need consensus.
 
-**Alternative considered:** Per-call agent factory that caches by identity hash. Rejected
-as premature — there is only ever one identity in this server.
+**Why not C (HTTP REST):** Using an HTTP wrapper (ICP dashboard API, ic.house API) would
+make `cktoken_get_balance` functionally identical to the Bitcoin and Ethereum tools — an
+HTTP call to a centralised endpoint. The entire point of this tool is to demonstrate a
+genuine ICP canister interaction. Using REST would undermine the Chain Fusion narrative.
 
----
-
-## 9. Express for SSE transport
-
-**Decision:** The SSE transport uses Express rather than Node.js's built-in `http` module
-or a framework like Fastify/Hono.
-
-**Why:** Express is the de facto standard for simple Node.js HTTP servers. The SSE surface
-is tiny (two routes: `GET /sse`, `POST /messages`) and does not benefit from Fastify's
-schema-based optimisations or Hono's edge-runtime compatibility. Express adds minimal
-overhead and is already a transitive dependency of several Dfinity packages. Using the
-built-in `http` module was considered but would require manual request body parsing and
-routing, adding boilerplate with no benefit.
+**Why not D (certified query):** Certificate verification requires fetching the canister's
+certified data, verifying the IC root key signature, and traversing the Merkle tree. This
+is non-trivial and would add ~100 lines of verification code. For v0.1 where the server is
+already experimental, the operational trust of the NNS-governed subnet is sufficient.
+Certified balance reads are tracked as a future hardening step.
 
 ---
 
-## 10. Zod for config validation and input schemas
+## 8. HttpAgent lifecycle: single shared instance at startup
 
-**Decision:** `zod` is used for both environment variable config validation (`src/config.ts`)
-and tool input schema definitions.
+**Decision:** One `HttpAgent` is created at startup and passed to all tool handlers as a
+shared dependency for the process lifetime.
 
-**Why:**
-- Zod produces clear, field-level error messages at startup when config is wrong (via
-  `required_error` on `.string()`). `process.exit(1)` with a human-readable message is
-  far better than a cryptic runtime failure 30 seconds into the first tool call.
-- The MCP SDK accepts Zod schemas directly for tool input validation — no manual JSON
-  Schema construction.
-- `z.coerce.number()` handles the env-var-to-number conversion (`MCP_SSE_PORT`,
-  `CACHE_TTL_MS`) transparently.
-- Alternative (manual validation + JSON Schema objects): more verbose, no type inference,
-  error messages require hand-writing.
+### Options considered
 
----
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — New agent per tool call | Maximum isolation, always fresh root key | Rejected |
+| B — Agent pool (e.g., 4 agents) | Concurrency headroom, some reuse | Rejected |
+| **C — Single shared agent** | **Created once at startup, zero per-call overhead** | **Chosen** |
+| D — Lazy singleton (created on first ICP call) | Deferred startup cost | Rejected |
 
-## 11. Central error normalisation (`src/errors.ts`)
+**Why C:**
 
-**Decision:** All tool handlers call `toMcpError(err, context)` which maps any thrown value
-to a structured `McpError` with a consistent format.
+`HttpAgent` creation is not cheap: it involves PEM file I/O, `createPrivateKey()`, JWK
+export, `Ed25519KeyIdentity.fromSecretKey()`, and (for non-mainnet) a `fetchRootKey()`
+network round-trip. On a non-mainnet setup, creating a per-call agent would add 200–500ms
+of latency to every ICP tool invocation. The agent holds no mutable per-request state — its
+identity, host, and root key are all fixed at creation time. Sharing it across concurrent
+calls is safe.
 
-**Why:** Three distinct error ecosystems converge in this server:
-1. ICP `ReplicaRejectError` — has `reject_code` (3/4/5) and `reject_message`
-2. EVM JSON-RPC errors — plain objects with `{ code: number, message: string }`
-3. Network errors — `TypeError` from `fetch` with a message containing "fetch"
+**Why not A (per-call):** 200–500ms per call overhead for the root key fetch, plus the
+unnecessary CPU cost of key derivation on each call. No correctness benefit.
 
-Without central normalisation, each tool handler would need to know about all three error
-shapes. `toMcpError()` hides this complexity and ensures Claude always receives a structured
-`McpError` rather than an unformatted stack trace.
+**Why not B (pool):** There is only one identity and one ICP endpoint in this server.
+Pooling multiple agents of the same identity/host provides no concurrency benefit —
+`HttpAgent` is already thread-safe for concurrent calls since it uses stateless request
+signing.
 
-**Critical ordering:** `instanceof McpError` must be checked *before* `isEvmRpcError()`
-because `McpError` has both `code` (number) and `message` (string) fields that satisfy the
-EVM error shape check. See `src/errors.ts:27`.
-
----
-
-## 12. Confirmation guard via `confirm: true` schema field
-
-**Decision:** Write tools (`bitcoin_broadcast_transaction`, `eth_send_raw_transaction`)
-declare `confirm: z.literal(true).optional()` in their Zod schema. Omitting it returns a
-preview; passing `confirm: true` executes the write.
-
-**Why:**
-- Claude calls tools speculatively during planning. Without a guard, a tool-calling loop
-  could broadcast a transaction before the user has reviewed it.
-- `z.literal(true).optional()` means Claude must explicitly pass the value `true` — it
-  cannot satisfy the schema by passing `"true"`, `1`, or `false`.
-- The preview response includes enough information (network, truncated hex, byte count) for
-  the user to verify intent before approving.
-- Alternative (separate `preview_*` and `execute_*` tools): doubles the tool count and
-  creates confusion about which to call. Single tool with a confirmation gate is clearer.
+**Why not D (lazy singleton):** A lazy singleton would cause the first ICP tool call to
+be significantly slower than subsequent ones and would surface connectivity errors as a
+tool error rather than a startup error. Eager creation catches misconfigurations early.
 
 ---
 
-## 13. In-session idempotency via module-level Set
+## 9. SSE HTTP framework: Express
 
-**Decision:** A module-level `Set<string>` tracks raw transaction hex strings broadcast in
-the current process lifetime. A duplicate submission returns a warning without calling the
-network.
+**Decision:** The SSE transport uses Express. Two routes: `GET /sse` and `POST /messages`.
 
-**Why:** Claude can call a tool multiple times in the same session if it loses track of
-the result (e.g., after a timeout or a planning loop). Broadcasting the same signed
-transaction twice would cause a "transaction already in mempool" error on the network side
-and confuse Claude. The module-level Set catches this within a session at zero cost.
+### Options considered
 
-**Known limitation:** The Set is cleared on server restart. If Claude times out waiting for
-a response and then re-connects to a fresh server instance, the duplicate check will not
-fire. Durable idempotency (request ID persistence to disk) is a P0 TODO.
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — Node.js built-in `http` module | Zero dependencies | Rejected |
+| **B — Express** | **Minimal, battle-tested, already a transitive dep** | **Chosen** |
+| C — Fastify | Schema-based, faster JSON serialisation | Rejected |
+| D — Hono | Edge-runtime compatible, modern API | Rejected |
+| E — Koa | Middleware composition, lighter than Express | Rejected |
+
+**Why B:**
+
+The SSE server is two routes. There is no JSON serialisation on the hot path (the MCP SDK
+handles all serialisation), no complex middleware chain, and no performance requirement that
+requires Fastify's schema-based approach. Express handles this workload with essentially
+zero observable overhead. More importantly, Express is already present in the dependency
+tree as a transitive dependency of several Dfinity packages, so it adds no net new
+dependency weight.
+
+**Why not A (built-in `http`):** Would require manual URL routing (`if (req.url ===
+'/sse')`), manual query string parsing (`req.url.split('?')[1]`), and manual JSON body
+parsing. Approximately 40 lines of boilerplate to replace what Express provides in two
+`app.get()` / `app.post()` calls. The built-in module is the right choice for zero-dep
+libraries; for an application server, Express is strictly better ergonomics.
+
+**Why not C (Fastify):** Fastify's main benefit is schema-based request/response
+serialisation. The SSE endpoints don't serialise application JSON — the MCP SDK writes
+directly to the `res` stream. Fastify's schema validation on the `POST /messages` route
+would add complexity without benefit. It is also not a transitive dep, adding ~200KB to the
+install.
+
+**Why not D (Hono):** Hono's edge-runtime and multi-runtime compatibility is its selling
+point. This server runs on Node.js only. Hono is not a transitive dep and would add ~50KB
+for a feature (runtime portability) that is not needed.
 
 ---
 
-## 14. LRU read cache with 10s TTL
+## 10. Config validation: Zod
+
+**Decision:** Zod is used for both environment variable config validation (`src/config.ts`)
+and tool input schema definitions. Schemas are declared once and serve both runtime
+validation and TypeScript type inference.
+
+### Options considered
+
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — Manual validation + JSON Schema objects | Maximum control, no library | Rejected |
+| B — `joi` | Mature, expressive, JS-only types | Rejected |
+| C — `yup` | Similar to Zod, weaker TS inference | Rejected |
+| D — `typebox` | JSON Schema–first, excellent TS types | Rejected |
+| **E — Zod** | **TypeScript-first, `required_error`, MCP SDK integration, `z.coerce`** | **Chosen** |
+| F — `envalid` for config, Zod for tools | Two libraries, clearer separation | Rejected |
+
+**Why E:**
+
+- **MCP SDK integration.** `McpServer.tool()` accepts Zod schemas directly for input
+  validation. No conversion step, no duplicate schema definitions. The same Zod object
+  that describes the tool's inputs at runtime also provides the TypeScript type for the
+  handler function's argument.
+- **`required_error` for env vars.** `z.string({ required_error: 'ICP_IDENTITY_PEM is
+  required' })` produces a message that names the missing variable directly. Without this,
+  Zod's default is `"Required"` — unhelpful for a startup config error.
+- **`z.coerce.number()` for env vars.** Environment variables are always strings.
+  `z.coerce.number()` converts `"3000"` to `3000` transparently. Manual coercion in each
+  handler is boilerplate.
+- **Single source of truth.** `z.infer<typeof ConfigSchema>` gives the `Config` type for
+  free. Adding a new config field means updating the Zod schema; TypeScript enforces that
+  all consumers handle the new field.
+
+**Why not A (manual + JSON Schema):** More verbose, no type inference from schema
+definition, error messages require hand-writing, validation logic is duplicated between
+config and tool inputs.
+
+**Why not B (joi):** joi's TypeScript types are a separate `@hapi/hoek` dependency and the
+inference is weaker than Zod's. joi is also CommonJS-first, which requires additional
+configuration in an ESM project.
+
+**Why not D (typebox):** typebox is excellent and produces JSON Schema compatible with more
+tools, but the MCP SDK's native Zod integration means typebox would require a conversion
+step (typebox → JSON Schema → MCP). Adds a step with no benefit here.
+
+**Why not F (envalid for config):** Using two libraries for closely related concerns (config
+validation vs. tool input validation) is unnecessary complexity. Zod handles both cleanly.
+
+---
+
+## 11. Error handling: central `toMcpError()` in `src/errors.ts`
+
+**Decision:** All tool handler `catch` blocks call `toMcpError(err, context)` which
+normalises any thrown value into a structured `McpError`. Tool handlers never construct
+`McpError` directly except for known precondition checks (e.g., `ETH_RPC_URL` not
+configured).
+
+### Options considered
+
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — Each handler catches and maps its own errors | Maximum locality, no shared code | Rejected |
+| B — Middleware wrapper that catches and re-throws | Handlers stay clean, errors centralised | Rejected |
+| **C — `toMcpError()` utility called in each `catch`** | **Explicit, testable, no magic wrapping** | **Chosen** |
+| D — Global `process.on('uncaughtException')` handler | Catches everything, including unrelated errors | Rejected |
+
+**Why C:**
+
+Three distinct error shapes converge in this server: ICP `ReplicaRejectError` (with
+`reject_code` 3/4/5), EVM JSON-RPC errors (plain objects with `{ code, message }`), and
+network `TypeError`s from `fetch`. Without a shared normalisation function, every handler
+would need to import and test all three shapes. `toMcpError()` is a pure function, easily
+unit-tested, and explicit — the handler decides when to call it.
+
+**Critical ordering in `toMcpError()`:** `instanceof McpError` must be checked before
+`isEvmRpcError()`. `McpError` has both a numeric `code` field and a string `message` field,
+which satisfies the EVM error shape guard. Without the `instanceof` check first, a
+`McpError` thrown by `requireRpcUrl()` would be re-wrapped into a new `McpError` with
+different code and message, losing the original error type. See `src/errors.ts:27`.
+
+**Why not A (per-handler):** Each handler would need to `import { isReplicaRejectError,
+isEvmRpcError }` and implement its own mapping logic. Any new error shape (e.g., a new
+Dfinity error class) would require updating every handler. This is the classic case where
+central normalisation eliminates cross-cutting repetition.
+
+**Why not B (middleware wrapper):** A wrapping function like `withErrorNormalisation(handler)`
+would obscure the error handling in stack traces and make it harder to see where an error
+was first caught. Explicit `catch (err) { throw toMcpError(err) }` blocks are visible at
+the call site.
+
+**Why not D (global uncaughtException):** This would catch errors from the MCP SDK
+internals, Express, and other unrelated code paths. Tool-level errors would lose their
+`context` argument. Blunt instrument.
+
+---
+
+## 12. Write tool safety: `confirm: true` schema guard
+
+**Decision:** Write tools declare `confirm: z.literal(true).optional()` in their Zod
+schema. Calling without `confirm` returns a preview; calling with `confirm: true` executes
+the write.
+
+### Options considered
+
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — No guard (execute immediately) | Simplest API | Rejected |
+| B — Separate `preview_bitcoin_broadcast` and `bitcoin_broadcast` tools | Clear separation | Rejected |
+| **C — Single tool, `confirm: true` flag** | **Single tool, preview by default, opt-in execution** | **Chosen** |
+| D — Two-phase: tool returns a token, second call redeems token | Cryptographic confirmation | Rejected |
+| E — User-level confirmation prompt (out-of-band) | Platform handles confirmation | Rejected |
+
+**Why C:**
+
+Claude calls tools speculatively during planning and reasoning. It will often call a tool
+to "see what happens" before committing to an action. Without a guard, a planning loop
+could broadcast a transaction before the user has reviewed the details. The `confirm: true`
+pattern is established in the MCP ecosystem for exactly this reason.
+
+`z.literal(true).optional()` is deliberate: the only value that satisfies the schema is the
+boolean `true`. Passing `"true"` (string), `1` (number), or `false` (wrong boolean) all
+fail Zod validation. Claude cannot accidentally trigger execution by passing a truthy value.
+
+**Why not A:** Acceptable for read tools (the worst case is a wasted network round-trip),
+unacceptable for broadcast tools where the action is irreversible.
+
+**Why not B (separate tools):** Doubles the tool count (9 tools → 11+ tools). Claude would
+need to know to call `preview_bitcoin_broadcast` first then `bitcoin_broadcast` second,
+which is non-obvious from tool descriptions alone. A single tool with a guard is more
+self-explanatory in its schema.
+
+**Why not D (token-based):** Adds a session state machine (issue token → validate token →
+execute). Significantly more complex to implement correctly (token expiry, replay
+protection). The `confirm: true` pattern achieves the same safety goal with far less
+machinery.
+
+**Why not E (out-of-band prompt):** MCP does not currently have a standardised out-of-band
+user confirmation mechanism. The tool itself must handle it.
+
+---
+
+## 13. Idempotency: module-level `Set<string>`
+
+**Decision:** A module-level `Set<string>` tracks the raw hex of every transaction
+broadcast in the current process lifetime. A second broadcast attempt with the same hex
+returns a warning instead of a network call.
+
+### Options considered
+
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — No idempotency guard | Simple, rely on network's "already in mempool" error | Rejected |
+| **B — Module-level `Set<string>` (in-process, not durable)** | **Zero cost, covers same-session duplicates** | **Chosen** |
+| C — File-based persistence (append to `~/.chain-fusion/submitted.log`) | Survives restart, durable | Deferred |
+| D — SQLite / LevelDB local database | Durable, queryable, heavier | Rejected |
+| E — Hash of tx hex (not full hex) as Set key | Smaller memory footprint | Rejected |
+
+**Why B:**
+
+The primary failure mode is Claude calling `bitcoin_broadcast_transaction` twice within a
+single session because it lost track of the result (e.g., a tool timeout caused it to
+retry). This is entirely in-process and does not require durability. A `Set<string>` is
+zero-cost, requires no I/O, and catches the duplicate on the first check.
+
+**Why not A:** The Mempool.space API returns a 400 error for "transaction already in
+mempool." Without the guard, this error propagates to Claude as a tool failure, which
+would likely cause Claude to retry the broadcast, creating a confused error loop.
+
+**Why not C/D (durable):** Durable idempotency is a P0 TODO, not rejected. It is the
+correct solution for the timeout-before-response failure mode (Claude times out, server
+restarts, Claude retries — the Set is empty). However, durable storage requires defining
+a storage format, a cleanup strategy, and handling I/O errors. For v0.1, the in-process
+Set is the right scope.
+
+**Why not E (hash):** The raw tx hex is used as the key because it is already in memory,
+hashing adds a CPU step with no practical benefit (Set lookups on strings are O(1) based on
+hash), and the full hex provides a better human-readable audit log if one is added later.
+
+---
+
+## 14. Read cache: LRU with 10s TTL
 
 **Decision:** All read-only tool responses are cached in a `LRUCache<string, string>` with
-a 10-second TTL and a 500-entry cap.
+a 10-second TTL and a 500-entry cap. Cache values are serialised JSON strings.
 
-**Why:**
-- During a transaction-building conversation, Claude will call `bitcoin_get_utxos` or
-  `eth_get_balance` several times for the same address. Without a cache, each call makes a
-  real network round-trip (Mempool.space or an ETH RPC node).
-- 10 seconds is short enough to keep data fresh for user-facing decisions and long enough
-  to absorb rapid repeated calls within a single Claude response.
-- Cache values are serialised JSON strings (not parsed objects) to avoid the `lru-cache`
-  value type constraint and make cache reads a simple string lookup.
-- Write tools are never cached — cache keys are only set in read-only handlers.
+### Options considered
 
-**LRU over a plain Map:** The 500-entry cap prevents unbounded memory growth in long-running
-SSE sessions with many distinct addresses.
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — No cache | Maximum freshness, simpler code | Rejected |
+| B — Plain `Map<string, string>` with manual TTL | Simple, no dependency | Rejected |
+| **C — `lru-cache` with TTL and entry cap** | **Bounded memory, TTL built-in, well-tested** | **Chosen** |
+| D — Redis | External cache, persistent, shared across instances | Rejected |
+| E — Per-tool custom caching logic | Maximum control per tool | Rejected |
+
+**Why C:**
+
+During a transaction-building conversation, Claude will call `bitcoin_get_utxos` or
+`eth_get_balance` multiple times for the same address within seconds. Without a cache, each
+call is a real network round-trip. The `lru-cache` package handles TTL expiry, LRU eviction,
+and bounded memory automatically. It is a single transitive dep that is already widely used.
+
+**TTL of 10 seconds:** Short enough that stale data does not mislead a user making a
+decision (UTXO sets and balances are unlikely to change in 10 seconds during a single
+conversation), long enough to absorb the repeated rapid calls Claude makes within one
+response generation.
+
+**500-entry cap:** In a long-running SSE session with many distinct addresses, a plain `Map`
+would grow without bound. 500 entries × ~1 KB average JSON per entry = ~500 KB maximum
+memory. The LRU eviction means the most recently used entries are retained.
+
+**String values, not parsed objects:** `lru-cache` v11 requires value type `{}` (non-null
+object). Storing parsed JavaScript objects would violate this constraint for primitive
+values like numbers. Storing serialised JSON strings avoids the type constraint entirely
+and makes cache reads a single string lookup — the caller JSON-parses if needed, or more
+commonly the cached string is returned directly as the tool response text.
+
+**Why not A (no cache):** Every repeated call within a conversation would make a real
+network request. For Mempool.space this is a free REST call, so the cost is latency only,
+but the pattern of calling the same tool multiple times in quick succession is common enough
+to warrant caching.
+
+**Why not B (plain Map):** A plain `Map` has no TTL mechanism and no eviction policy.
+Implementing both correctly is more code than using `lru-cache`. The Map also grows
+without bound in a long-running server.
+
+**Why not D (Redis):** Redis is an external service with a connection, serialisation
+overhead, and operational complexity. For a single-process MCP server, an in-memory cache
+is always faster and requires no infrastructure. Redis would be appropriate for a
+horizontally scaled deployment; that is not the v0.1 scenario.
 
 ---
 
-## 15. Vitest for tests
+## 15. Test framework: Vitest
 
-**Decision:** Tests use Vitest rather than Jest.
+**Decision:** Tests use Vitest. The test runner, assertion library, and mocking system are
+all from Vitest. No Jest, Mocha, or native Node.js test runner.
 
-**Why:**
-- The project uses `"type": "module"` (ESM). Jest requires `--experimental-vm-modules` or
-  a Babel transform to handle ESM. Vitest is ESM-native and works out of the box.
-- Vitest's `vi.stubGlobal('fetch', mockFetch)` replaces the global `fetch` used by all
-  tool handlers cleanly, without needing `jest.spyOn(global, 'fetch')` hacks.
-- API is Jest-compatible (`describe`, `it`, `expect`, `beforeEach`) so there is no learning
-  curve.
-- Fast: 35 tests complete in ~400ms with zero configuration.
+### Options considered
+
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — Jest | Most popular, excellent ecosystem | Rejected |
+| **B — Vitest** | **ESM-native, Jest-compatible API, fast, `vi.stubGlobal`** | **Chosen** |
+| C — Node.js built-in test runner (`node:test`) | Zero dependencies | Rejected |
+| D — Mocha + Chai + Sinon | Modular, proven | Rejected |
+| E — `tap` | TAP output, minimal API | Rejected |
+
+**Why B:**
+
+The project uses `"type": "module"` (ESM). Jest's ESM support requires either
+`--experimental-vm-modules` (Node.js flag, unstable API surface) or a `babel-jest`
+transform that strips types and converts ESM to CommonJS. Both approaches add config
+overhead and obscure the actual source being tested.
+
+Vitest is ESM-native: no transform required, `.ts` files are imported directly via
+`tsx`/`esbuild`, and `import.meta` works in tests. The test suite requires a single
+`vitest.config.ts` with four lines.
+
+`vi.stubGlobal('fetch', mockFetch)` replaces the global `fetch` function used by all tool
+handlers cleanly, without any `jest.spyOn(global, 'fetch')` footgun (Jest's global stubbing
+has well-documented pitfalls with ESM).
+
+**Why not A (Jest):** The ESM + TypeScript setup would require `babel.config.json` or
+`jest.config.ts` with `transform`, `extensionsToTreatAsEsm`, and `moduleNameMapper`
+entries. This is a known painful configuration that Vitest was explicitly designed to
+eliminate.
+
+**Why not C (built-in `node:test`):** The Node.js built-in test runner has no built-in
+mocking system. `vi.stubGlobal` would need to be replaced with manual monkey-patching of
+the global `fetch`. The assertion API is not Jest-compatible, requiring a learning step.
+Also lacks `beforeEach` with automatic cleanup.
+
+**Why not D (Mocha + Chai + Sinon):** Three packages to configure instead of one. Mocha's
+ESM support via `--loader` is functional but requires separate setup. The split between
+runner (Mocha), assertions (Chai), and mocks (Sinon) adds boilerplate compared to Vitest's
+unified API.
 
 ---
 
-## 16. Eager `fetchRootKey()` for non-mainnet
+## 16. Root key fetch: eager at startup for non-mainnet
 
-**Decision:** When `ICP_NETWORK` is not `mainnet`, `fetchRootKey()` is called immediately
-after agent creation, not lazily on the first tool call.
+**Decision:** When `ICP_NETWORK !== 'mainnet'`, `agent.fetchRootKey()` is called
+immediately after agent creation. If it fails, the server exits with a clear error before
+accepting any tool calls.
 
-**Why:**
-- On local dfx replicas and testnets the root key changes on every network restart.
-  Fetching it lazily means the first tool call after a network restart pays the latency
-  cost (200–500ms) and any connectivity failure surfaces as a confusing tool error rather
-  than a clear startup error.
-- Eager fetch surfaces connectivity problems at startup with a clear `process.exit(1)`
-  message: "Failed to fetch ICP root key from {host}."
-- On mainnet `fetchRootKey()` is never called — it is a security risk to trust a
-  dynamically fetched root key on the production network where the key is baked into the
-  SDK.
+### Options considered
+
+| Option | Description | Verdict |
+|--------|-------------|---------|
+| A — Lazy (fetch on first ICP tool call) | Defers startup cost, no cost if ICP tools unused | Rejected |
+| **B — Eager (fetch at startup, exit on failure)** | **Fast first tool call, errors surface early** | **Chosen** |
+| C — Background fetch (start server, fetch root key async) | No startup delay, possible race condition | Rejected |
+| D — Cache root key to disk, refresh periodically | Survives restarts, complex invalidation | Rejected |
+
+**Why B:**
+
+On local dfx replicas and IC testnets, the root key changes every time the network is
+restarted (dfx stop / dfx start). This means a stale cached root key will cause every ICP
+call to fail with a signature verification error. Fetching eagerly at startup guarantees
+the key is current and surfaces connectivity problems before the server starts accepting
+tool calls — Claude gets a clear startup error rather than a confusing tool error 30 seconds
+into a conversation.
+
+The latency cost (one HTTP round-trip to the ICP node, ~100–200ms) is paid once. Every
+subsequent tool call within the session uses the cached key with zero overhead.
+
+**Mainnet is never called.** On mainnet, `fetchRootKey()` would be a security risk:
+the IC root key is a trust anchor hardcoded in the Dfinity SDK. A server that dynamically
+fetches and trusts a root key over HTTPS could be MITM'd. The SDK intentionally logs a
+warning if `fetchRootKey()` is called on mainnet. The server skips it entirely for mainnet.
+
+**Why not A (lazy):** The first ICP tool call (typically `cktoken_get_balance`) would pay
+the root key fetch latency. More importantly, if the dfx replica is not running, the error
+would manifest as a tool failure ("Canister query failed") with no indication that the
+underlying problem is a missing root key. Startup errors are much more diagnosable.
+
+**Why not C (background):** Creates a race condition where the first ICP tool call might
+arrive before `fetchRootKey()` completes. Handling this requires a lock or a promise that
+tool handlers must await — additional complexity with no benefit over eager startup.
+
+**Why not D (disk cache):** Adds file I/O at startup, a cache invalidation strategy (how
+does the server know the local dfx network was restarted?), and error handling for corrupt
+cache files. The root key fetch is fast enough that caching provides no meaningful benefit.
 
 ---
 
-## 17. Identified critical gaps (P0 before production)
+## 17. Critical gaps identified (P0 before production use)
 
-Three failure modes were identified during the engineering review that must be addressed
-before the server is used with real funds:
+These are not deferred features — they are known failure modes with no current mitigation
+that could cause fund loss or silent incorrect behaviour with real assets.
 
-**1. t-ECDSA timeout with no recovery path**
-ICP threshold signing (for ckBTC withdrawal or future native BTC signing) can take up to
-30 seconds. If the `HttpAgent` times out before receiving the response, Claude has no way
-to know whether the transaction was submitted. The idempotency Set covers the
-duplicate-broadcast case but not the timeout-before-response case. Fix: persist the ICP
-request ID to disk before sending the signing request, then poll for the response on
-recovery.
+### Gap 1: t-ECDSA timeout leaves request state unknown
 
-**2. EVM error JSON embedded in ic-evm-rpc responses**
-The ic-evm-rpc canister sometimes returns EVM errors as JSON-encoded strings inside Candid
-text fields rather than in the standard JSON-RPC `error` key. `extractEvmResult()` handles
-the known pattern, but edge cases may leak raw JSON to Claude. Fix: expand the detection
-logic and add test cases for each known error shape.
+**Problem:** ICP threshold signing operations (used for ckBTC withdrawals and future native
+Bitcoin signing) can take up to 30 seconds. If the `HttpAgent`'s HTTP request times out
+before the signing response arrives, the server has no way to determine whether the
+transaction was submitted to the Bitcoin network or not. The in-session idempotency Set
+records only *successful* broadcasts — a timed-out request leaves the Set empty and the
+transaction state unknown.
 
-**3. No cycles budget cap**
-There is no per-request or per-session spending limit on ICP cycles. A runaway Claude
-session (e.g., a loop calling `cktoken_get_balance` on thousands of principals) could burn
-an unchecked amount of cycles. Fix: add a `MAX_CYCLES_PER_SESSION` config variable and a
-middleware counter that rejects tool calls once the budget is exhausted.
+**Failure scenario:** Claude calls `ckbtc_transfer` (future tool). The t-ECDSA signing
+takes 28 seconds. The HTTP request times out at 25 seconds. Claude retries the call. The
+ICP subnet is still processing the first request. Depending on timing, zero, one, or two
+transactions may be submitted. There is no way for the server to tell.
+
+**Options for fix:**
+- Persist the ICP request ID to disk before sending the signing request, then poll
+  `agent.fetchCertifiedResponse(requestId)` on recovery. This is the correct solution.
+- Use a nonce-based approach: include a unique nonce in the transfer memo and check the
+  on-chain transaction history before retrying. Requires an additional canister query.
+
+### Gap 2: EVM error JSON embedded in ic-evm-rpc responses
+
+**Problem:** The ic-evm-rpc canister sometimes returns EVM JSON-RPC errors as
+JSON-encoded strings inside Candid text fields rather than in the standard JSON-RPC `error`
+key. The `extractEvmResult()` function handles the known pattern, but the canister's error
+format has not been exhaustively catalogued. Edge cases could cause raw JSON error strings
+to reach Claude as tool output rather than being converted to a structured `McpError`.
+
+**Failure scenario:** An ETH call reverts. The EVM RPC canister wraps the revert reason in
+an unusual format. `extractEvmResult()` does not recognise it. Claude receives a JSON string
+as the tool result and must parse it manually — likely misinterpreting the error.
+
+**Fix:** Enumerate all EVM RPC canister error response shapes from the canister's source
+code. Add a test case for each. Expand `extractEvmResult()` to handle all known shapes.
+
+### Gap 3: No cycles budget cap
+
+**Problem:** ICP query calls cost no cycles, but any update calls (ckToken transfers, future
+t-ECDSA signing) do cost cycles. There is no per-request or per-session cycles spending
+limit. A runaway Claude session — for example, a loop that repeatedly calls a write tool
+due to a planning error — could exhaust the ICP identity's cycles balance entirely.
+
+**Failure scenario:** A Claude session enters a tool-calling loop due to a malformed
+instruction. It calls `ckbtc_transfer` 200 times before the user notices. Each call costs
+cycles. The identity's cycles balance is drained.
+
+**Fix:** Add a `MAX_CYCLES_PER_SESSION` config variable (default: a conservative small
+amount). Track cycles spent per session in a counter. Reject write tool calls once the
+session budget is exhausted, returning a clear error to Claude.
