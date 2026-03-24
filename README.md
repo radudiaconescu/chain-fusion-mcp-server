@@ -188,6 +188,12 @@ ICP_IDENTITY_PEM=./identity.pem   # required
 ETH_RPC_URL=https://...           # required for eth_* tools
 ICP_NETWORK=mainnet
 MCP_TRANSPORT=stdio
+
+# Optional overrides
+ICP_NODE_URL=https://ic0.app      # default: https://ic0.app
+BTC_API_URL=https://mempool.space/api  # default: mempool.space
+CACHE_TTL_MS=10000                # read cache TTL in ms (default: 10s)
+MCP_SSE_PORT=3000                 # only needed for SSE transport
 ```
 
 ### Claude Desktop (stdio)
