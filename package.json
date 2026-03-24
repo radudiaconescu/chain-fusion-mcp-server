@@ -1,0 +1,37 @@
+{
+  "name": "chain-fusion-mcp-server",
+  "version": "0.1.0",
+  "description": "MCP server for ICP Chain Fusion — Bitcoin, Ethereum, and ckTokens via the Internet Computer",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "chain-fusion-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@dfinity/agent": "^2.0.0",
+    "@dfinity/candid": "^2.0.0",
+    "@dfinity/identity": "^2.0.0",
+    "@dfinity/ledger-icrc": "^2.0.0",
+    "@dfinity/principal": "^2.0.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "express": "^4.21.0",
+    "lru-cache": "^11.0.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
