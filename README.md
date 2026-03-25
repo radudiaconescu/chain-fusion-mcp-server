@@ -57,6 +57,7 @@ This MCP server gives Claude direct access to that infrastructure.
 | Tool | Description |
 |------|-------------|
 | `cktoken_get_balance` | Balance of ckBTC, ckETH, or ckUSDC for any ICP principal — a real on-chain ICP query call |
+| `cktoken_transfer` | Transfer ckBTC, ckETH, or ckUSDC to any ICP principal via ICRC-1. Amount is a string to preserve precision. Confirm guard required. Transfer intent is persisted to `~/.chain-fusion/pending.jsonl` before the ICP call. |
 
 ---
 
@@ -194,6 +195,7 @@ ICP_NODE_URL=https://ic0.app      # default: https://ic0.app
 BTC_API_URL=https://mempool.space/api  # default: mempool.space
 CACHE_TTL_MS=10000                # read cache TTL in ms (default: 10s)
 MCP_SSE_PORT=3000                 # only needed for SSE transport
+CYCLES_BUDGET_E8S=                # max ICP cycles per session — parsed but enforcement not yet wired up (see TODOS.md)
 ```
 
 ### Claude Desktop (stdio)

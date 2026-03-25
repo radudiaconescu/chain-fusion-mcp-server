@@ -58,4 +58,25 @@ describe('loadConfig', () => {
     process.env.ETH_RPC_URL = 'not-a-url';
     expect(() => loadConfig()).toThrow();
   });
+
+  it('cyclesBudgetE8s is undefined when CYCLES_BUDGET_E8S is not set', () => {
+    process.env.ICP_IDENTITY_PEM = './identity.pem';
+    delete process.env.CYCLES_BUDGET_E8S;
+    const config = loadConfig();
+    expect(config.cyclesBudgetE8s).toBeUndefined();
+  });
+
+  it('cyclesBudgetE8s is parsed from CYCLES_BUDGET_E8S', () => {
+    process.env.ICP_IDENTITY_PEM = './identity.pem';
+    process.env.CYCLES_BUDGET_E8S = '1000000000';
+    const config = loadConfig();
+    expect(config.cyclesBudgetE8s).toBe(1_000_000_000);
+  });
+
+  it('cyclesBudgetE8s is undefined when CYCLES_BUDGET_E8S is 0 (treat as unlimited)', () => {
+    process.env.ICP_IDENTITY_PEM = './identity.pem';
+    process.env.CYCLES_BUDGET_E8S = '0';
+    const config = loadConfig();
+    expect(config.cyclesBudgetE8s).toBeUndefined();
+  });
 });

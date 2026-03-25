@@ -65,7 +65,7 @@ describe('extractEvmResult', () => {
     expect(extractEvmResult<string>(raw)).toBe('0x1');
   });
 
-  it('throws when response contains an error field', () => {
+  it('throws when response contains an error field (Shape 1)', () => {
     const raw = JSON.stringify({
       jsonrpc: '2.0',
       id: 1,
@@ -74,12 +74,31 @@ describe('extractEvmResult', () => {
     expect(() => extractEvmResult(raw)).toThrow();
   });
 
-  it('returns non-JSON strings as-is', () => {
+  it('returns non-JSON strings as-is (Shape 3 — plain text)', () => {
     expect(extractEvmResult<string>('plain text')).toBe('plain text');
   });
 
   it('returns plain JSON values that are not error/result wrappers', () => {
     const raw = JSON.stringify({ foo: 'bar' });
     expect(extractEvmResult<{ foo: string }>(raw)).toEqual({ foo: 'bar' });
+  });
+
+  it('unwraps one level of string-encoded JSON (Shape 2 — ic-evm-rpc Candid wrapping)', () => {
+    // ic-evm-rpc sometimes returns the JSON-RPC response as a JSON string inside Candid
+    const inner = JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0xabc' });
+    const outer = JSON.stringify(inner); // double-encoded string
+    expect(extractEvmResult<string>(outer)).toBe('0xabc');
+  });
+
+  it('throws on string-encoded JSON with error field (Shape 2 + error)', () => {
+    const inner = JSON.stringify({ error: { code: -32603, message: 'execution reverted' } });
+    const outer = JSON.stringify(inner);
+    expect(() => extractEvmResult(outer)).toThrow();
+  });
+
+  it('throws on bare error object without wrapper (Shape 4)', () => {
+    // ic-evm-rpc sometimes returns { "code": N, "message": "..." } directly
+    const raw = JSON.stringify({ code: -32000, message: 'nonce too low' });
+    expect(() => extractEvmResult(raw)).toThrow();
   });
 });
