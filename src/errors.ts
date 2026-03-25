@@ -81,23 +81,49 @@ function isEvmRpcError(err: unknown): err is { code: number; message: string } {
 
 /**
  * Parses an Ethereum JSON-RPC response body, throwing if it contains an error field.
- * The ic-evm-rpc canister sometimes embeds EVM errors as JSON strings inside Candid —
- * this handles both the direct object case and the stringified case.
+ *
+ * The ic-evm-rpc canister embeds EVM errors in several shapes:
+ *
+ *   Shape 1 — standard JSON-RPC error object:
+ *     { "error": { "code": -32000, "message": "..." } }
+ *
+ *   Shape 2 — error embedded as a JSON string (canister Candid → string wrapping):
+ *     "{ \"error\": { \"code\": -32000, \"message\": \"...\" } }"
+ *
+ *   Shape 3 — plain text error string (no JSON):
+ *     "execution reverted"
+ *
+ *   Shape 4 — error message string directly (not wrapped in object):
+ *     "{ \"code\": -32000, \"message\": \"...\" }"
  */
 export function extractEvmResult<T>(responseBody: string): T {
   let parsed: unknown;
   try {
     parsed = JSON.parse(responseBody);
   } catch {
+    // Shape 3: plain text — not JSON at all, return as-is
     return responseBody as T;
   }
 
-  if (parsed && typeof parsed === 'object' && 'error' in parsed) {
-    throw (parsed as { error: unknown }).error;
+  // Shape 2: the parsed value is itself a string — unwrap one level of JSON encoding
+  if (typeof parsed === 'string') {
+    return extractEvmResult<T>(parsed);
   }
 
-  if (parsed && typeof parsed === 'object' && 'result' in parsed) {
-    return (parsed as { result: T }).result;
+  if (parsed && typeof parsed === 'object') {
+    // Shape 1: standard { error: ... } wrapper
+    if ('error' in parsed) {
+      throw (parsed as { error: unknown }).error;
+    }
+
+    // Shape 4: bare error object { code, message } without wrapper
+    if ('code' in parsed && 'message' in parsed) {
+      throw parsed;
+    }
+
+    if ('result' in parsed) {
+      return (parsed as { result: T }).result;
+    }
   }
 
   return parsed as T;
