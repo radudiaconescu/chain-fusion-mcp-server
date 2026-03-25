@@ -72,7 +72,7 @@ export async function createAgent(config: Config): Promise<HttpAgent> {
  *   - PKCS8 Ed25519 (dfx default since v0.14, kty=OKP crv=Ed25519)
  *   - SEC1/PKCS8 secp256k1 (icp-cli default, older dfx, kty=EC crv=secp256k1)
  */
-function identityFromPem(pem: string): Ed25519KeyIdentity | Secp256k1KeyIdentity {
+export function identityFromPem(pem: string): Ed25519KeyIdentity | Secp256k1KeyIdentity {
   const keyObject = createPrivateKey(pem);
   const jwk = keyObject.export({ format: 'jwk' }) as {
     kty: string;

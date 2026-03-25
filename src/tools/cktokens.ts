@@ -6,6 +6,7 @@ import { Principal } from '@icp-sdk/core/principal';
 import { cacheGet, cacheSet, makeCacheKey } from '../cache.js';
 import { toMcpError } from '../errors.js';
 import { appendPending, markSettled } from '../transfer-log.js';
+import type { CyclesBudget } from '../cycles-budget.js';
 
 /**
  * Chain Fusion token canister IDs on ICP mainnet.
@@ -86,7 +87,11 @@ function formatTokenAmount(raw: bigint, decimals: number): string {
 // For cross-session durability see transfer-log.ts.
 const submittedTransferFingerprints = new Set<string>();
 
-export function registerCkTokenTools(server: McpServer, agent: HttpAgent): void {
+export function registerCkTokenTools(
+  server: McpServer,
+  agent: HttpAgent,
+  opts?: { budget?: CyclesBudget },
+): void {
   // ─── cktoken_get_balance ──────────────────────────────────────────────────
   server.tool(
     'cktoken_get_balance',
@@ -251,6 +256,11 @@ export function registerCkTokenTools(server: McpServer, agent: HttpAgent): void 
 
       const canisterId = getCanisterId(token as TokenSymbol, network);
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+      // Check cycles budget BEFORE writing to log and making the ICP call.
+      // Throws McpError if the session has exceeded its configured cycle cap,
+      // keeping the transfer log clean (no dangling pending entries).
+      opts?.budget?.charge();
 
       // Persist intent BEFORE the ICP call (non-fatal if log write fails).
       // The log id is used for settlement tracking; memo is omitted from the
