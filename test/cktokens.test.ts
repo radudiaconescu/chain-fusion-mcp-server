@@ -43,12 +43,13 @@ vi.mock('../src/transfer-log.js', () => ({
 }));
 
 import { registerCkTokenTools } from '../src/tools/cktokens.js';
+import { CyclesBudget } from '../src/cycles-budget.js';
 
 const mockAgent = {} as HttpAgent;
 
-function makeServer() {
+function makeServer(opts?: { budget?: CyclesBudget }) {
   const server = new McpServer({ name: 'test', version: '0.0.1' });
-  registerCkTokenTools(server, mockAgent);
+  registerCkTokenTools(server, mockAgent, opts);
   return server;
 }
 
@@ -273,5 +274,56 @@ describe('cktoken_transfer', () => {
     // Amount is validated before log write — invalid amount should not reach ICP or log
     expect(mockTransfer).not.toHaveBeenCalled();
     expect(mockAppendPending).not.toHaveBeenCalled();
+  });
+
+  it('throws McpError when cycles budget is exceeded, before log write and ICP call', async () => {
+    // Budget of 0 — any update call immediately exceeds it.
+    // Use a unique amount to avoid triggering the idempotency guard from earlier tests.
+    const exhaustedBudget = new CyclesBudget(0);
+
+    await expect(
+      callTool(makeServer({ budget: exhaustedBudget }), 'cktoken_transfer', {
+        token: 'ckBTC',
+        to: 'aaaaa-aa',
+        amount: '777000001', // unique amount — no fingerprint collision with earlier tests
+        network: 'mainnet',
+        confirm: true,
+      }),
+    ).rejects.toBeInstanceOf(McpError);
+
+    // Budget exceeded BEFORE appendPending and ledger.transfer — log stays clean
+    expect(mockAppendPending).not.toHaveBeenCalled();
+    expect(mockTransfer).not.toHaveBeenCalled();
+  });
+
+  it('does not charge cycles budget in preview mode', async () => {
+    const budget = new CyclesBudget(0); // zero budget — would throw if charged
+    const chargeSpy = vi.spyOn(budget, 'charge');
+
+    const result = await callTool(makeServer({ budget }), 'cktoken_transfer', {
+      token: 'ckBTC',
+      to: 'aaaaa-aa',
+      amount: '777000002', // unique amount
+      network: 'mainnet',
+      // no confirm — preview mode only
+    });
+
+    expect(result).toContain('Transfer Preview');
+    expect(chargeSpy).not.toHaveBeenCalled();
+  });
+
+  it('proceeds normally when no budget is configured', async () => {
+    mockTransfer.mockResolvedValueOnce(10n);
+
+    const result = await callTool(makeServer(), 'cktoken_transfer', {
+      token: 'ckBTC',
+      to: 'aaaaa-aa',
+      amount: '777000003', // unique amount
+      network: 'mainnet',
+      confirm: true,
+    });
+
+    const data = JSON.parse(result);
+    expect(data.success).toBe(true);
   });
 });
