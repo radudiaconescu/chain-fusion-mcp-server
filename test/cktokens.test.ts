@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { McpError } from '@modelcontextprotocol/sdk/types.js';
-import type { HttpAgent } from '@dfinity/agent';
+import type { HttpAgent } from '@icp-sdk/core/agent';
 import { initCache } from '../src/cache.js';
 
 // vi.mock is hoisted — define shared mock fns with vi.hoisted() so they're
@@ -13,8 +13,8 @@ const { mockBalance, mockTransfer, mockAppendPending, mockMarkSettled } = vi.hoi
   mockMarkSettled: vi.fn().mockResolvedValue(undefined),
 }));
 
-// ─── Mock @dfinity/ledger-icrc ────────────────────────────────────────────────
-vi.mock('@dfinity/ledger-icrc', () => ({
+// ─── Mock @icp-sdk/canisters/ledger/icrc ─────────────────────────────────────
+vi.mock('@icp-sdk/canisters/ledger/icrc', () => ({
   IcrcLedgerCanister: {
     create: vi.fn(() => ({
       balance: mockBalance,
@@ -23,8 +23,8 @@ vi.mock('@dfinity/ledger-icrc', () => ({
   },
 }));
 
-// ─── Mock @dfinity/principal ──────────────────────────────────────────────────
-vi.mock('@dfinity/principal', () => ({
+// ─── Mock @icp-sdk/core/principal ────────────────────────────────────────────
+vi.mock('@icp-sdk/core/principal', () => ({
   Principal: {
     fromText: vi.fn((text: string) => {
       if (text === 'invalid-principal') {
