@@ -107,17 +107,30 @@ test/
 
 ## Known gaps (before production use)
 
-See TODOS.md for full detail. The two remaining P0 gaps:
-1. **t-ECDSA timeout** — no request ID persistence; unknown state if signing times out
-2. **Cycles budget enforcement** — `CYCLES_BUDGET_E8S` config field parses but doesn't enforce
+See TODOS.md for full detail. The remaining P0 gap:
+1. **Cycles budget enforcement** — `CYCLES_BUDGET_E8S` config field parses but doesn't enforce
+
+## Roadmap (from TODOS.md)
+
+```
+P0  Cycles budget enforcement
+P1  ICRC-1 transfer recovery (pending log scan at startup)
+P1  ckBTC minter tools (deposit address + update_balance + withdraw)
+P1  Ed25519/secp256k1 PEM unit tests
+P2  chain_fusion_status dashboard tool
+P2  Generic ICP canister tool (query always; update requires ICP_CANISTER_UPDATE_ALLOWLIST)
+P2  t-ECDSA DurableTransferLog
+P3  chain-fusion-agent canister (/canister monorepo, Motoko — unlocks native BTC/ETH signing)
+```
 
 ---
 
 ## What's NOT in scope (yet)
 
-- Transaction signing (Bitcoin/ETH key management)
+- Direct transaction signing (requires chain-fusion-agent canister — P3)
+- ckBTC minter deposit + withdrawal (planned P1 — not yet built)
 - ICRC-2 approve + transfer flow
-- Arbitrary ICP canister calls
+- Arbitrary ICP canister calls (planned P2 with allowlist)
 - Certified query verification
 - Hardware key (YubiKey / HSM) support
 
