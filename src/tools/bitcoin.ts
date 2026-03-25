@@ -1,12 +1,30 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import type { HttpAgent } from '@icp-sdk/core/agent';
+import { BitcoinCanister } from '@icp-sdk/canisters/ckbtc';
+import { Principal } from '@icp-sdk/core/principal';
 import { cacheGet, cacheSet, makeCacheKey } from '../cache.js';
 import { toMcpError } from '../errors.js';
 
-// Submitted tx hashes — prevents Claude from broadcasting the same tx twice.
-// Cleared on server restart (sufficient for single-session safety).
-const submittedTxHashes = new Set<string>();
+/**
+ * Bitcoin canister IDs on ICP.
+ *
+ * The dedicated Bitcoin canister replaced the management canister's bitcoin_*
+ * methods. Query variants (getBalanceQuery, getUtxosQuery) are callable from
+ * external JS clients with no cycles cost. Update variants require cycles and
+ * are canister-to-canister only.
+ *
+ * Mainnet: ghsi2-tqaaa-aaaan-aaaca-cai
+ * Testnet: g4xu7-jiaaa-aaaan-aaaaq-cai
+ */
+const BITCOIN_CANISTER_IDS = {
+  mainnet: 'ghsi2-tqaaa-aaaan-aaaca-cai',
+  testnet: 'g4xu7-jiaaa-aaaan-aaaaq-cai',
+} as const;
 
+// Fee rates and broadcast still use Mempool.space:
+//   - Bitcoin canister fee percentiles are update calls (canister-only)
+//   - Bitcoin canister send_transaction is also an update call (canister-only)
 const BTC_API_URLS = {
   mainnet: 'https://mempool.space/api',
   testnet: 'https://mempool.space/testnet/api',
@@ -25,47 +43,62 @@ async function fetchBtcApi<T>(url: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// Submitted tx hashes — prevents Claude from broadcasting the same tx twice.
+// Cleared on server restart (sufficient for single-session safety).
+const submittedTxHashes = new Set<string>();
+
 export function registerBitcoinTools(
   server: McpServer,
-  opts: { btcApiUrl?: string },
+  opts: { agent: HttpAgent; btcApiUrl?: string },
 ): void {
   // ─── bitcoin_get_balance ──────────────────────────────────────────────────
+  //
+  // Uses the ICP Bitcoin canister query call (getBalanceQuery).
+  // Returns confirmed balance only (default: 6+ confirmations).
+  // Not threshold-certified, but sourced directly from ICP's Bitcoin integration
+  // rather than a third-party API.
   server.tool(
     'bitcoin_get_balance',
-    'Get the Bitcoin balance for an address (confirmed + unconfirmed)',
+    'Get the confirmed Bitcoin balance for an address via ICP Bitcoin canister (P2PKH, P2SH, P2WPKH, P2TR, P2WSH)',
     {
-      address: z.string().describe('Bitcoin address (P2PKH, P2SH, P2WPKH, P2TR, or P2WSH)'),
+      address: z.string().describe('Bitcoin address'),
       network: z
         .enum(['mainnet', 'testnet'])
         .default('mainnet')
         .describe('Bitcoin network'),
+      min_confirmations: z
+        .number()
+        .int()
+        .min(0)
+        .max(6)
+        .default(6)
+        .describe('Minimum confirmations (0–6, default 6)'),
     },
-    async ({ address, network }) => {
-      const key = makeCacheKey('bitcoin_get_balance', { address, network });
+    async ({ address, network, min_confirmations }) => {
+      const key = makeCacheKey('bitcoin_get_balance', { address, network, min_confirmations });
       const cached = cacheGet<string>(key);
       if (cached) return { content: [{ type: 'text', text: cached }] };
 
       try {
-        const apiUrl = resolveApiUrl(network, opts.btcApiUrl);
-        const data = await fetchBtcApi<{
-          chain_stats: { funded_txo_sum: number; spent_txo_sum: number };
-          mempool_stats: { funded_txo_sum: number; spent_txo_sum: number };
-        }>(`${apiUrl}/address/${address}`);
+        const btcCanister = BitcoinCanister.create({
+          agent: opts.agent,
+          canisterId: Principal.fromText(BITCOIN_CANISTER_IDS[network]),
+        });
 
-        const confirmedSat =
-          data.chain_stats.funded_txo_sum - data.chain_stats.spent_txo_sum;
-        const unconfirmedSat =
-          data.mempool_stats.funded_txo_sum - data.mempool_stats.spent_txo_sum;
+        const satoshi = await btcCanister.getBalanceQuery({
+          address,
+          network,
+          minConfirmations: min_confirmations,
+        });
 
         const text = JSON.stringify(
           {
             address,
             network,
-            confirmed_satoshis: confirmedSat,
-            unconfirmed_satoshis: unconfirmedSat,
-            total_satoshis: confirmedSat + unconfirmedSat,
-            confirmed_btc: (confirmedSat / 1e8).toFixed(8),
-            total_btc: ((confirmedSat + unconfirmedSat) / 1e8).toFixed(8),
+            min_confirmations,
+            confirmed_satoshis: satoshi.toString(),
+            confirmed_btc: (Number(satoshi) / 1e8).toFixed(8),
+            source: 'icp-bitcoin-canister',
           },
           null,
           2,
@@ -80,9 +113,12 @@ export function registerBitcoinTools(
   );
 
   // ─── bitcoin_get_utxos ────────────────────────────────────────────────────
+  //
+  // Uses the ICP Bitcoin canister getUtxosQuery.
+  // Returns confirmed UTXOs only. txid is returned as hex string.
   server.tool(
     'bitcoin_get_utxos',
-    'Get unspent transaction outputs (UTXOs) for a Bitcoin address',
+    'Get confirmed unspent transaction outputs (UTXOs) for a Bitcoin address via ICP Bitcoin canister',
     {
       address: z.string().describe('Bitcoin address'),
       network: z.enum(['mainnet', 'testnet']).default('mainnet'),
@@ -93,32 +129,35 @@ export function registerBitcoinTools(
       if (cached) return { content: [{ type: 'text', text: cached }] };
 
       try {
-        const apiUrl = resolveApiUrl(network, opts.btcApiUrl);
-        const utxos = await fetchBtcApi<
-          Array<{
-            txid: string;
-            vout: number;
-            status: { confirmed: boolean; block_height?: number };
-            value: number;
-          }>
-        >(`${apiUrl}/address/${address}/utxo`);
+        const btcCanister = BitcoinCanister.create({
+          agent: opts.agent,
+          canisterId: Principal.fromText(BITCOIN_CANISTER_IDS[network]),
+        });
 
-        const totalSat = utxos.reduce((sum, u) => sum + u.value, 0);
+        const result = await btcCanister.getUtxosQuery({ address, network });
+
+        type Utxo = { height: number; value: bigint; outpoint: { txid: Uint8Array; vout: number } };
+        const utxos = result.utxos.map((u: Utxo) => ({
+          txid: Buffer.from(u.outpoint.txid).toString('hex'),
+          vout: u.outpoint.vout,
+          value_satoshis: u.value.toString(),
+          value_btc: (Number(u.value) / 1e8).toFixed(8),
+          block_height: u.height,
+          confirmed: u.height > 0,
+        }));
+
+        const totalSatoshi = result.utxos.reduce((sum: bigint, u: Utxo) => sum + u.value, 0n);
+
         const text = JSON.stringify(
           {
             address,
             network,
             utxo_count: utxos.length,
-            total_satoshis: totalSat,
-            total_btc: (totalSat / 1e8).toFixed(8),
-            utxos: utxos.map((u) => ({
-              txid: u.txid,
-              vout: u.vout,
-              value_satoshis: u.value,
-              value_btc: (u.value / 1e8).toFixed(8),
-              confirmed: u.status.confirmed,
-              block_height: u.status.block_height ?? null,
-            })),
+            total_satoshis: totalSatoshi.toString(),
+            total_btc: (Number(totalSatoshi) / 1e8).toFixed(8),
+            tip_height: result.tip_height,
+            source: 'icp-bitcoin-canister',
+            utxos,
           },
           null,
           2,
@@ -133,9 +172,13 @@ export function registerBitcoinTools(
   );
 
   // ─── bitcoin_get_fee_rates ────────────────────────────────────────────────
+  //
+  // Uses Mempool.space — the Bitcoin canister's fee percentile method is an
+  // update call (canister-only, requires cycles). Mempool.space is the
+  // pragmatic choice for external fee rate reads.
   server.tool(
     'bitcoin_get_fee_rates',
-    'Get current Bitcoin fee rate recommendations in sat/vByte',
+    'Get current Bitcoin fee rate recommendations in sat/vByte (via Mempool.space)',
     {
       network: z.enum(['mainnet', 'testnet']).default('mainnet'),
     },
@@ -178,10 +221,14 @@ export function registerBitcoinTools(
   );
 
   // ─── bitcoin_broadcast_transaction ───────────────────────────────────────
+  //
+  // Uses Mempool.space — the Bitcoin canister's send_transaction is an update
+  // call (canister-to-canister only, requires cycles). External JS clients
+  // must use a traditional broadcast API.
   server.tool(
     'bitcoin_broadcast_transaction',
     [
-      'Broadcast a signed Bitcoin transaction to the network.',
+      'Broadcast a signed Bitcoin transaction to the network via Mempool.space.',
       'IMPORTANT: Call without confirm first to preview. Pass confirm: true to actually broadcast.',
       'The transaction must be fully signed before broadcasting.',
     ].join(' '),
@@ -215,7 +262,7 @@ export function registerBitcoinTools(
         };
       }
 
-      // Idempotency guard — hash the raw tx to detect duplicate submissions
+      // Idempotency guard — detect duplicate submissions within the session
       if (submittedTxHashes.has(raw_transaction_hex)) {
         return {
           content: [
