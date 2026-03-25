@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.3.0] - 2026-03-25
+
+### Changed
+- **SDK migration**: Replaced `@dfinity/agent`, `@dfinity/candid`, `@dfinity/identity`, `@dfinity/ledger-icrc`, `@dfinity/principal` with `@icp-sdk/core@^5.2.0` and `@icp-sdk/canisters@^3.5.2`. `@dfinity/utils@^4.1.0` retained as required peer dep.
+- **Bitcoin balance/UTXO reads**: Switched from Mempool.space to the dedicated ICP Bitcoin canister (`ghsi2-tqaaa-aaaan-aaaca-cai` mainnet, `g4xu7-jiaaa-aaaan-aaaaq-cai` testnet) via `BitcoinCanister.getBalanceQuery()` / `getUtxosQuery()`. Genuine ICP query calls — no cycles, ~200ms. Fee rates and broadcast remain on Mempool.space.
+- **ICP identity**: Added secp256k1 key support. `Secp256k1KeyIdentity.fromPem()` from `@icp-sdk/core/identity/secp256k1` handles icp-cli and older dfx keys. Key type auto-detected at startup (kty=OKP/Ed25519 vs kty=EC/secp256k1). Both dfx and icp-cli PEMs now work without modification.
+- **ARCHITECTURE.md**: Sections 2, 3, 5, 7, and 17 updated for new SDK, Bitcoin canister architecture, and secp256k1 support.
+- **README.md**: Bitcoin tools table, engineering tradeoffs, identity section, prerequisites, and test count updated.
+- **Test suite**: Expanded from 59 to 64 tests. Bitcoin test suite rewritten for Bitcoin canister mocks (`BitcoinCanister.create`, `getBalanceQuery`, `getUtxosQuery`).
+
+### Breaking Changes
+- `bitcoin_get_balance` no longer returns `unconfirmed_satoshis`. Only `confirmed_satoshis` is returned (default: 6+ confirmations, configurable 0–6 via `min_confirmations`). The Bitcoin canister query path does not expose mempool/unconfirmed data.
+
 ## [0.2.0] - 2026-03-25
 
 ### Added

@@ -46,7 +46,7 @@ as a P1 follow-up.
 ## 2. Stack: TypeScript / Node.js
 
 **Decision:** TypeScript on Node.js, `"type": "module"` (ESM), using
-`@modelcontextprotocol/sdk`, `@dfinity/agent`, and `@dfinity/ledger-icrc`.
+`@modelcontextprotocol/sdk`, `@icp-sdk/core`, and `@icp-sdk/canisters`.
 
 ### Options considered
 
@@ -59,10 +59,11 @@ as a P1 follow-up.
 
 **Why D:**
 
-- **SDK first-class support.** `@modelcontextprotocol/sdk`, `@dfinity/agent`,
-  `@dfinity/identity`, and `@dfinity/ledger-icrc` are all TypeScript-first packages.
-  Using any other language would require either REST shims, generated Candid bindings, or
-  calling out to a JS subprocess — adding a translation layer with no functional benefit.
+- **SDK first-class support.** `@modelcontextprotocol/sdk`, `@icp-sdk/core` (agent,
+  identity, principal, candid), and `@icp-sdk/canisters` (ICRC-1 ledger, Bitcoin canister)
+  are all TypeScript-first packages. Using any other language would require either REST
+  shims, generated Candid bindings, or calling out to a JS subprocess — adding a translation
+  layer with no functional benefit.
 
 - **PEM parsing with no native addons.** Node.js's built-in `crypto.createPrivateKey()`
   parses PKCS8 Ed25519 PEMs and exports JWK natively. No C extension, no WASM, no
@@ -86,11 +87,20 @@ process or hand-writing Candid encoding. Significantly higher implementation cos
 
 ---
 
-## 3. ICP identity: PKCS8 Ed25519 PEM file
+## 3. ICP identity: PEM file (Ed25519 + secp256k1)
 
-**Decision:** Identity is loaded from a PKCS8 Ed25519 PEM file at startup, as exported by
-`dfx identity export <name>`. The key is parsed via Node.js `crypto` into an
-`Ed25519KeyIdentity` at process start.
+**Decision:** Identity is loaded from a PEM file at startup. Both PKCS8 Ed25519 (dfx
+default) and SEC1/PKCS8 secp256k1 (icp-cli default, older dfx) are supported. The key is
+parsed via Node.js `crypto` into an `Ed25519KeyIdentity` or `Secp256k1KeyIdentity` at
+process start.
+
+### Identity tooling
+
+| Tool | Command | PEM format |
+|------|---------|------------|
+| `dfx` (v0.14+) | `dfx identity export <name> > identity.pem` | PKCS8 Ed25519 |
+| `icp-cli` | `icp-cli new-identity <name>` | SEC1 secp256k1 (stored at `~/.config/dfx/identity/<name>/identity.pem`) |
+| `dfx` (legacy, pre-v0.14) | `dfx identity export <name> > identity.pem` | SEC1 secp256k1 |
 
 ### Options considered
 
@@ -100,46 +110,36 @@ process or hand-writing Candid encoding. Significantly higher implementation cos
 | B — Hardware key (YubiKey / HSM) | Maximum security, hardware-bound key | Deferred |
 | C — Encrypted keystore (password-protected) | Key stored on disk, encrypted at rest | Rejected |
 | D — Environment variable (raw hex secret) | Simple, no file required | Rejected |
-| **E — PKCS8 Ed25519 PEM (dfx default)** | **Matches dfx output, parseable natively, no extra deps** | **Chosen** |
-| F — secp256k1 PEM (legacy dfx) | Older dfx format, separate package required | Rejected |
+| **E — PKCS8 Ed25519 PEM (dfx default)** | **Matches dfx output, parseable natively** | **Chosen** |
+| **F — secp256k1 PEM (icp-cli / older dfx)** | **Supported via `Secp256k1KeyIdentity.fromPem()`** | **Also chosen** |
 
-**Why E:**
+**Why E + F:**
 
-- dfx has exported Ed25519 PKCS8 PEM by default since v0.14 (2023). Every active ICP
-  developer already has one. The onboarding step is `dfx identity export <name> > identity.pem`
-  — a single command with no new tooling.
-- `createPrivateKey(pem).export({ format: 'jwk' })` extracts the 32-byte `d` field and
-  `Ed25519KeyIdentity.fromSecretKey()` accepts it directly. The entire parsing path is
-  four lines with no dependencies beyond Node.js stdlib and `@dfinity/identity`.
-- The PEM is a standard, well-understood format. It can be inspected with `openssl pkcs8`
-  if something goes wrong.
+- Both formats are PEM files on disk — the same security properties apply (`chmod 600`,
+  out of shell history, inspectable with `openssl`).
+- `createPrivateKey(pem).export({ format: 'jwk' })` identifies the curve (kty=OKP/Ed25519
+  vs kty=EC/secp256k1). Ed25519 keys are loaded via `Ed25519KeyIdentity.fromSecretKey()`;
+  secp256k1 keys use `Secp256k1KeyIdentity.fromPem()` from `@icp-sdk/core/identity/secp256k1`.
+- Supporting both eliminates the "migrate your identity" friction when onboarding users of
+  icp-cli or older dfx installations.
 
-**Why not A (Internet Identity):** AuthClient requires a browser window and user
-interaction for each session. An MCP server is a background process; it cannot open a
-browser or wait for human input mid-session.
+**Why not A (Internet Identity):** `@icp-sdk/auth` (AuthClient) requires a browser window
+and user interaction. An MCP server is a headless process that cannot open a browser or
+await human input mid-session. Not applicable.
 
 **Why not B (hardware key):** Hardware keys cannot run in CI, containers, or headless
-servers. The `dfinity/identity-hsm` package is not widely used. This is the right long-term
-answer for production with real funds, but adds a hardware dependency that blocks developer
-onboarding. Tracked as a future security hardening step.
+servers. Tracked as a future security hardening step.
 
 **Why not C (encrypted keystore):** Password-protected keystores require either an
 interactive password prompt (incompatible with headless startup) or a second secret to
-unlock the first (which just moves the problem). Adds complexity without changing the
-fundamental trust model for a local developer tool.
+unlock the first. Adds complexity without changing the fundamental trust model.
 
-**Why not D (env var):** Raw hex secrets in environment variables are one `printenv` or
-misconfigured log away from leaking. PEM files on disk can be `chmod 600`'d and kept out
-of shell history. They are the established ICP convention for good reason.
+**Why not D (env var):** Raw hex secrets are one `printenv` or misconfigured log away from
+leaking. PEM files on disk are the established ICP convention.
 
-**Why not F (secp256k1):** `@dfinity/identity-secp256k1` is a separate package not
-included in `@dfinity/identity`. Supporting it in v0.1 would add a dependency for a
-shrinking user segment (older dfx identities). The error message for a secp256k1 PEM
-explicitly tells the user to run `dfx identity new --storage-mode=plaintext <name>` to
-generate a compatible Ed25519 identity.
-
-**Implementation:** `createPrivateKey(pem)` → `export({ format: 'jwk' })` → base64url-decode
-`d` → `Ed25519KeyIdentity.fromSecretKey(ArrayBuffer)`. See `src/identity.ts:70–93`.
+**Implementation:** `createPrivateKey(pem)` → `export({ format: 'jwk' })` → branch on
+kty/crv → `Ed25519KeyIdentity.fromSecretKey(Uint8Array)` or `Secp256k1KeyIdentity.fromPem(pem)`.
+See `src/identity.ts`.
 
 ---
 
@@ -187,49 +187,61 @@ the correct transport. Concurrent clients are supported.
 
 ---
 
-## 5. Bitcoin reads: Mempool.space REST API
+## 5. Bitcoin reads: ICP Bitcoin canister (balance/UTXOs) + Mempool.space (fee rates/broadcast)
 
-**Decision:** Bitcoin balance, UTXO, and fee rate reads use the Mempool.space public REST
-API. The ICP management canister's native Bitcoin integration is not used for reads.
+**Decision:** Bitcoin balance and UTXO reads use the dedicated ICP Bitcoin canister
+(`ghsi2-tqaaa-aaaan-aaaca-cai` mainnet) via query calls. Fee rates and transaction
+broadcast still use the Mempool.space REST API.
+
+### Background: management canister deprecation
+
+ICP's original `bitcoin_get_balance` and `bitcoin_get_utxos` were methods on the
+**management canister**. These have been deprecated and removed. Bitcoin functionality
+now lives in a dedicated **Bitcoin canister** with the same methods but a separate
+canister ID. The Bitcoin canister exposes both update variants (canister-to-canister,
+consume cycles) and `_query` variants (externally callable, no cycles, not certified).
 
 ### Options considered
 
-| Option | Description | Verdict |
-|--------|-------------|---------|
-| A — ICP management canister (`bitcoin_get_balance`, `bitcoin_get_utxos`) | Native ICP, threshold-verified data | Rejected |
-| B — Bitcoin Core JSON-RPC | Self-hosted full node, maximum trust | Rejected |
-| C — Blockstream Esplora API | Similar to Mempool.space, good coverage | Rejected |
-| **D — Mempool.space REST API** | **Free, no auth, mainnet + testnet, configurable base URL** | **Chosen** |
-| E — Blockchain.info API | Old, rate-limited, no testnet | Rejected |
+| Operation | Source | Rationale |
+|-----------|--------|-----------|
+| `bitcoin_get_balance` | Bitcoin canister `getBalanceQuery()` | Query call, no cycles, direct ICP data |
+| `bitcoin_get_utxos` | Bitcoin canister `getUtxosQuery()` | Query call, no cycles, direct ICP data |
+| `bitcoin_get_fee_rates` | Mempool.space REST | Bitcoin canister fee percentiles are update-only (canister-to-canister) |
+| `bitcoin_broadcast_transaction` | Mempool.space REST | Bitcoin canister `send_transaction` is update-only (canister-to-canister) |
 
-**Why D:**
+### Why Bitcoin canister for balance/UTXOs
 
-ICP's native `bitcoin_get_balance` and `bitcoin_get_utxos` management canister methods are
-**update calls**, not query calls. Update calls go through BFT consensus across all
-subnet nodes and require the caller to attach cycles to pay for computation. An `HttpAgent`
-running outside a canister has no mechanism to attach cycles to an update call — cycles are
-a canister-level resource, not something an external HTTP client can provide. This makes
-the management canister's Bitcoin methods completely inaccessible from this server.
+The dedicated Bitcoin canister's `getBalanceQuery()` and `getUtxosQuery()` are genuine ICP
+query calls: they execute on a single replica, cost no cycles for external callers, and
+return in ~200ms. This directly exercises ICP's Bitcoin integration rather than routing
+through a third-party API.
 
-Mempool.space provides identical data (confirmed/unconfirmed balances, UTXO set, fee rate
-tiers) via free, unauthenticated REST endpoints with typical latency under 200ms. It covers
-both mainnet (`mempool.space/api`) and testnet (`mempool.space/testnet/api`). The
-`BTC_API_URL` override allows operators to point at a self-hosted Mempool.space instance
-(which is open source) if they require greater trust guarantees.
+**Tradeoff:** Balance is **confirmed only** (default: 6+ confirmations). There is no
+mempool/unconfirmed balance available from the query path. Tools that previously reported
+`unconfirmed_satoshis` no longer include that field — only `confirmed_satoshis` is returned.
 
-**Why not B (Bitcoin Core):** Requires the operator to run and sync a full node (>600 GB,
-weeks to sync). The server would become a full-node management tool rather than a Chain
-Fusion integration. Correct for production with real funds; wrong for developer onboarding.
+UTXO data from the Bitcoin canister includes `height` (block height; 0 = depth within
+confirmation window) but not the full Mempool.space metadata (address type, mempool flags).
+The `txid` field is a raw `Uint8Array` — converted to hex in the tool response.
 
-**Why not C (Esplora):** Blockstream's Esplora API and Mempool.space are functionally
-equivalent for our use case. Mempool.space was chosen because it is more actively
-maintained, has better fee rate data (more tier granularity), and has a more complete
-testnet endpoint. Both could be used interchangeably via `BTC_API_URL`.
+**Why not the update variants:** Update calls (`bitcoin_get_balance`, `bitcoin_get_utxos`)
+go through BFT consensus and require the caller to attach cycles. External `HttpAgent`
+clients cannot attach cycles — that is a canister-level resource. Only the `_query`
+variants are accessible from external JS clients.
 
-**Tradeoff explicitly accepted:** Mempool.space data is not threshold-signed by ICP nodes.
-A compromised Mempool.space response could return false balance or UTXO data. For read-only
-display this is an acceptable trust assumption. Before signing a transaction with Mempool
-UTXO data, a production system should cross-check against a second source.
+### Why Mempool.space for fee rates and broadcast
+
+The Bitcoin canister's `bitcoin_get_current_fee_percentiles` and `bitcoin_send_transaction`
+are update calls, canister-to-canister only. No external equivalent exists in the Bitcoin
+canister API. Mempool.space remains the pragmatic choice for these operations.
+
+The `BTC_API_URL` override allows operators to substitute any Mempool.space-compatible
+endpoint (Mempool.space is open source) for fee rate and broadcast operations.
+
+**Canister IDs:**
+- Mainnet: `ghsi2-tqaaa-aaaan-aaaca-cai`
+- Testnet: `g4xu7-jiaaa-aaaan-aaaaq-cai`
 
 ---
 
@@ -305,8 +317,8 @@ fiduciary subnet, which provides strong operational trust in practice — a mali
 from a single replica would be an extraordinary event.
 
 This is also the first tool in the server that makes a genuine ICP canister call. Unlike
-Bitcoin (Mempool.space) and Ethereum (direct RPC), `cktoken_get_balance` actually exercises
-the `@dfinity/agent` and `@dfinity/ledger-icrc` stack end-to-end. This is the Chain Fusion
+Ethereum (direct RPC), `cktoken_get_balance` actually exercises the `@icp-sdk/core` agent
+and `@icp-sdk/canisters/ledger/icrc` stack end-to-end. This is the Chain Fusion
 demonstration — a real on-chain ICP query call, no HTTP middleman.
 
 **Why not A (update call):** Update calls cost cycles, go through consensus, and take
@@ -756,7 +768,7 @@ transactions may be submitted. There is no way for the server to tell.
 - Use a nonce-based approach: include a unique nonce in the transfer memo and check the
   on-chain transaction history before retrying. Requires an additional canister query.
 
-### Gap 2: EVM error JSON embedded in ic-evm-rpc responses
+### Gap 2: EVM error JSON embedded in ic-evm-rpc responses *(resolved in v0.2.0)*
 
 **Problem:** The ic-evm-rpc canister sometimes returns EVM JSON-RPC errors as
 JSON-encoded strings inside Candid text fields rather than in the standard JSON-RPC `error`
@@ -764,12 +776,10 @@ key. The `extractEvmResult()` function handles the known pattern, but the canist
 format has not been exhaustively catalogued. Edge cases could cause raw JSON error strings
 to reach Claude as tool output rather than being converted to a structured `McpError`.
 
-**Failure scenario:** An ETH call reverts. The EVM RPC canister wraps the revert reason in
-an unusual format. `extractEvmResult()` does not recognise it. Claude receives a JSON string
-as the tool result and must parse it manually — likely misinterpreting the error.
-
-**Fix:** Enumerate all EVM RPC canister error response shapes from the canister's source
-code. Add a test case for each. Expand `extractEvmResult()` to handle all known shapes.
+**Resolution (v0.2.0):** All known EVM RPC canister error shapes have been enumerated and
+tested. `extractEvmResult()` now handles the full set of observed patterns. Test cases
+cover the common revert case, nested JSON strings, and unknown formats (which are safely
+re-raised as `McpError` with the raw content preserved for inspection).
 
 ### Gap 3: No cycles budget cap
 
