@@ -9,6 +9,10 @@ const ConfigSchema = z.object({
   btcApiUrl: z.string().url().optional(),
   ethRpcUrl: z.string().url().optional(),
   cacheTtlMs: z.coerce.number().int().positive().default(10_000),
+  // CYCLES_BUDGET_E8S: cap on ICP cycles spend per session (in e8s, 1 ICP = 1e8 e8s).
+  // When unset or 0, no budget cap is enforced (unlimited). Prevents runaway Claude
+  // sessions from burning unchecked cycles on ICP update calls.
+  cyclesBudgetE8s: z.coerce.number().int().nonnegative().optional().transform(v => v === 0 ? undefined : v),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -23,6 +27,7 @@ export function loadConfig(): Config {
     btcApiUrl: process.env.BTC_API_URL,
     ethRpcUrl: process.env.ETH_RPC_URL,
     cacheTtlMs: process.env.CACHE_TTL_MS,
+    cyclesBudgetE8s: process.env.CYCLES_BUDGET_E8S,
   });
 
   if (!result.success) {
