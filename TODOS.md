@@ -2,12 +2,6 @@
 
 ## Chain Fusion
 
-**Enforce cycles budget (CYCLES_BUDGET_E8S)**
-- **Priority:** P0
-- **What:** Wire up the `CYCLES_BUDGET_E8S` config field to actually enforce a per-session spending cap on ICP update calls. Config parsing is in place (v0.2.0); enforcement is not.
-- **Why:** A runaway Claude session could burn unlimited cycles. Without a cap, the server is not safe to leave running unattended.
-- **Context:** `cyclesBudgetE8s` is parsed in `src/config.ts`. Track cumulative cycles spent in a module-level counter; check before each update call; throw `McpError` with code `INVALID_REQUEST` if over budget. Reset on server restart. The counter should be exposed in a future `chain_fusion_status` tool.
-- **Depends on:** Nothing — self-contained
 
 **Add ICRC-1 transfer recovery (startup pending log scan)**
 - **Priority:** P1
@@ -26,12 +20,6 @@
 - **Context:** Minter mainnet: `mqygn-kiaaa-aaaar-qaadq-cai`. Minter testnet: `ml52i-qqaaa-aaaar-qaaba-cai`. `CkbtcMinterCanister` bindings exist in `@icp-sdk/canisters/ckbtc` (same module as `BitcoinCanister`). Create `src/tools/ckbtc-minter.ts` (new file). KYT gap: if a UTXO is flagged by ckBTC's Know Your Transaction analysis, `update_balance` silently returns 0. Add a note in the tool description and consider surfacing `get_known_utxos` from the minter to expose KYT status.
 - **Depends on:** Nothing
 
-**Add Ed25519/secp256k1 PEM parsing unit tests**
-- **Priority:** P1
-- **What:** Test `identityFromPem()` with: fixture Ed25519 PEM, fixture secp256k1 PEM, invalid PEM (should throw with helpful message), truncated PEM (should throw).
-- **Why:** Identity loading is the most critical startup path — a failure here breaks every tool silently. The dual Ed25519/secp256k1 path added in v0.3.0 has zero unit test coverage.
-- **Context:** Add `test/identity.test.ts`. Generate throwaway fixture keys for each type. Mock `@icp-sdk/core/identity` and `@icp-sdk/core/identity/secp256k1` to verify the correct branch is taken per key type.
-- **Depends on:** Nothing
 
 **Add chain_fusion_status dashboard tool**
 - **Priority:** P2
@@ -65,6 +53,14 @@
 - **Depends on:** Generic ICP canister tool (P2)
 
 ## Completed
+
+**Enforce cycles budget (CYCLES_BUDGET_E8S)**
+- **What:** Per-session cycles spending cap on ICP update calls. `CyclesBudget` class with `charge()` / `remaining`. Budget checked before each cktoken_transfer (before log write and ICP call). Throws `McpError` on overage. 7 unit tests.
+- **Completed:** v0.3.0 (2026-03-25)
+
+**Add Ed25519/secp256k1 PEM parsing unit tests**
+- **What:** `test/identity.test.ts` — 4 tests covering Ed25519 routing, secp256k1 routing, invalid PEM, and unsupported key type (RSA). Uses real fixture keys from Node.js `generateKeyPairSync`. Mocks ICP SDK constructors.
+- **Completed:** v0.3.0 (2026-03-25)
 
 **Fix 3 critical production gaps (EVM errors + ICRC-1 transfer log)**
 - **What:** (1) ICRC-1 transfer log — persist transfer args to JSONL before ICP call. (2) EVM error detection — handle all 4 ic-evm-rpc error shapes. (3) Cycles budget config field added (enforcement deferred — see P0 above).

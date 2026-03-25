@@ -14,7 +14,7 @@ layer (ckBTC, ckETH, ckUSDC), and broadcast pre-signed transactions — without 
 ## Current state
 
 **Version:** 0.3.0
-**Test suite:** 64 tests, 6 files, all passing
+**Test suite:** 78 tests, 8 files, all passing
 **Open PRs:** Check GitHub — typically one feature branch ahead of `main`
 
 ---
@@ -107,16 +107,16 @@ test/
 
 ## Known gaps (before production use)
 
-See TODOS.md for full detail. The remaining P0 gap:
-1. **Cycles budget enforcement** — `CYCLES_BUDGET_E8S` config field parses but doesn't enforce
+See TODOS.md for full detail. No P0 gaps remain. Next priorities:
+1. **ICRC-1 transfer recovery** (P1) — pending log not scanned at startup
+2. **ckBTC minter tools** (P1) — deposit address + update_balance + withdraw not yet built
 
 ## Roadmap (from TODOS.md)
 
 ```
-P0  Cycles budget enforcement
 P1  ICRC-1 transfer recovery (pending log scan at startup)
 P1  ckBTC minter tools (deposit address + update_balance + withdraw)
-P1  Ed25519/secp256k1 PEM unit tests
+P1  Ed25519/secp256k1 PEM unit tests  ✓ done
 P2  chain_fusion_status dashboard tool
 P2  Generic ICP canister tool (query always; update requires ICP_CANISTER_UPDATE_ALLOWLIST)
 P2  t-ECDSA DurableTransferLog
