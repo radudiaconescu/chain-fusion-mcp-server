@@ -1,8 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { HttpAgent } from '@dfinity/agent';
-import { IcrcLedgerCanister } from '@dfinity/ledger-icrc';
-import { Principal } from '@dfinity/principal';
+import type { HttpAgent } from '@icp-sdk/core/agent';
+import { IcrcLedgerCanister } from '@icp-sdk/canisters/ledger/icrc';
+import { Principal } from '@icp-sdk/core/principal';
 import { cacheGet, cacheSet, makeCacheKey } from '../cache.js';
 import { toMcpError } from '../errors.js';
 import { appendPending, markSettled } from '../transfer-log.js';

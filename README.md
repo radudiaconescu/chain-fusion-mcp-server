@@ -38,8 +38,8 @@ This MCP server gives Claude direct access to that infrastructure.
 
 | Tool | Description |
 |------|-------------|
-| `bitcoin_get_balance` | Confirmed + unconfirmed balance for any address (P2PKH, P2SH, P2WPKH, P2TR, P2WSH) |
-| `bitcoin_get_utxos` | Full UTXO set with confirmation status and block heights |
+| `bitcoin_get_balance` | Confirmed balance for any address via ICP Bitcoin canister (P2PKH, P2SH, P2WPKH, P2TR, P2WSH). 6+ confirmations by default (configurable 0–6). |
+| `bitcoin_get_utxos` | Full confirmed UTXO set with block heights via ICP Bitcoin canister |
 | `bitcoin_get_fee_rates` | Fastest / half-hour / hour / economy / minimum sat/vByte estimates |
 | `bitcoin_broadcast_transaction` | Broadcast a pre-signed transaction (confirmation guard required) |
 
@@ -81,14 +81,17 @@ custody of private keys.
 
 ## Engineering tradeoffs
 
-### Bitcoin reads via Mempool.space, not ICP management canister
+### Bitcoin reads via ICP Bitcoin canister (balance/UTXOs) + Mempool.space (fee rates/broadcast)
 
-ICP's native Bitcoin integration is powerful, but its query methods (`bitcoin_get_balance`,
-`bitcoin_get_utxos`) are **update calls** — they go through consensus and cost cycles. An
-HTTP agent running outside a canister cannot attach cycles to calls. For read-only use from
-an MCP server, Mempool.space's public REST API is a pragmatic substitute: no key required,
-low latency, covers mainnet and testnet. The tradeoff is trust in Mempool.space's data over
-ICP's threshold-signed UTXO set.
+ICP has a dedicated **Bitcoin canister** (`ghsi2-tqaaa-aaaan-aaaca-cai` mainnet,
+`g4xu7-jiaaa-aaaan-aaaaq-cai` testnet) that replaced the deprecated management canister
+Bitcoin API. It exposes `getBalanceQuery()` and `getUtxosQuery()` as genuine ICP query
+calls — callable from external JS clients, no cycles cost, ~200ms latency.
+
+Balance reads return **confirmed balance only** (default: 6+ confirmations). There is no
+unconfirmed/mempool balance from the query path. Fee rate estimates and transaction broadcast
+still use Mempool.space — the Bitcoin canister's equivalents are update-only calls that
+require canister-to-canister invocation and cannot be made from an external HTTP agent.
 
 ### ckToken balances via ICRC-1 query (free, no cycles)
 
@@ -119,13 +122,12 @@ protects against duplicate calls within a single Claude session, but the set is 
 server restart. Durability across restarts (e.g. for t-ECDSA timeout recovery) is a known
 gap — see TODOS.md.
 
-### ICP identity: Ed25519 PEM only
+### ICP identity: Ed25519 (dfx) and secp256k1 (icp-cli) PEM files
 
-dfx generates Ed25519 PKCS8 PEM files by default. The server parses these using Node.js
-`crypto.createPrivateKey()` + JWK export to extract the 32-byte secret for
-`Ed25519KeyIdentity.fromSecretKey()`. Legacy secp256k1 keys (older dfx versions) are not
-supported — the server throws a descriptive error explaining the mismatch and how to export
-an Ed25519 key.
+Both key types are supported. `dfx` (v0.14+) generates PKCS8 Ed25519 PEMs; `icp-cli`
+generates secp256k1 PEMs (stored at `~/.config/dfx/identity/<name>/identity.pem`). The
+server detects the key type at startup via `crypto.createPrivateKey()` + JWK export and
+loads the appropriate identity (`Ed25519KeyIdentity` or `Secp256k1KeyIdentity`).
 
 ### LRU read cache
 
@@ -166,7 +168,9 @@ See [TODOS.md](./TODOS.md) for the full list. The three blocking gaps are:
 ### Prerequisites
 
 - Node.js 20+
-- A dfx identity PEM file: `dfx identity export <name> > identity.pem`
+- An ICP identity PEM file — either:
+  - **dfx (v0.14+):** `dfx identity export <name> > identity.pem`
+  - **icp-cli:** `icp-cli new-identity <name>` — PEM is stored at `~/.config/dfx/identity/<name>/identity.pem`
 - (Optional) An Ethereum JSON-RPC URL if you want ETH tools
 
 ### Install and build
@@ -242,8 +246,8 @@ The SSE endpoint will be available at `http://localhost:3000/sse`.
 npm test
 ```
 
-35 unit tests covering config validation, error normalisation, Bitcoin tools, and Ethereum
-tools. The ckTokens tool is not yet unit-tested (tracked in TODOS.md).
+64 unit tests covering config validation, error normalisation, Bitcoin tools (including
+Bitcoin canister mocks), Ethereum tools, and ckToken tools.
 
 ---
 
