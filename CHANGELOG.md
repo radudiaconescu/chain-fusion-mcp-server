@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.4.0] - 2026-03-26
+
+### Added
+- **ckBTC minter tools** (`src/tools/ckbtc-minter.ts`): 5 new tools completing the full BTC ↔ ckBTC round-trip — `ckbtc_get_deposit_address`, `ckbtc_update_balance`, `ckbtc_get_withdrawal_account`, `ckbtc_withdraw`, `ckbtc_withdrawal_status`. Withdrawal preview (fee estimate + minimum check from `getMinterInfo`) and confirm guard. Duck-typed minter error guards for `MinterNoNewUtxosError`, `MinterMalformedAddressError`, `MinterAmountTooLowError`, and others.
+- **Durable withdrawal log** (`src/withdrawal-log.ts`): Persists withdrawal intents to `~/.chain-fusion/withdrawals.jsonl` before each ICP update call. JSONL append-only format with corrupt-line-safe parsing, matching the existing transfer log design.
+- **ICP canister** (`canister/src/lib.rs`, `canister/Cargo.toml`, `dfx.json`): Rust canister implementing 3 read-only MCP tools (`bitcoin_get_balance`, `bitcoin_get_fee_rates`, `cktoken_get_balance`) via `ic-cdk 0.18` directly (icarus-cdk omitted — its `linkme::distributed_slice` is incompatible with `wasm32-unknown-unknown`). Candid variant rename fix for `BitcoinNetwork`. 6 unit tests. Builds clean to 850K wasm.
+- **Test suite**: Expanded from 78 to 100 tests. 22 new tests covering all ckBTC minter tool paths.
+
+### Changed
+- **`src/server.ts`**: `registerCkBtcMinterTools` wired into `createServer`.
+- **CLAUDE.md**: Canister architecture section added (icarus-cdk incompatibility, ic-cdk 0.18 API, Candid variant encoding). File structure and roadmap updated.
+- **TODOS.md**: ckBTC minter tools and ICP canister marked completed. PocketIC integration tests (P2) and cycle-cost caching (P2) added as deferred items.
+
 ## [0.3.1] - 2026-03-26
 
 ### Added
