@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.3.1] - 2026-03-26
+
+### Added
+- **Cycles budget enforcement** (`src/cycles-budget.ts`): `CYCLES_BUDGET_E8S` now enforces a per-session spending cap on ICP update calls. Each `cktoken_transfer` call deducts `BASE_CYCLES_PER_UPDATE` (590,000 cycles) from the budget before writing to the transfer log or making the ICP call — keeping the log clean if the budget is exceeded. Configure with `CYCLES_BUDGET_E8S=<N>` in your environment; omit or set to 0 for no limit.
+- **Ed25519 and secp256k1 PEM unit tests** (`test/identity.test.ts`): 4 tests covering both key types, invalid PEM, and unsupported key types (RSA). Identity loading is the critical startup path — now covered.
+
+### Fixed
+- **VERSION file** was stale at `0.2.0` (package.json and CHANGELOG both at `0.3.0`). Synced.
+
+### Changed
+- **CLAUDE.md** (new file): Project context for AI coding sessions — architecture decisions, key patterns, roadmap, and known gaps.
+- **TODOS.md**: P0 (cycles budget) and P1 PEM tests moved to Completed. New P1 items: ckBTC minter tools. New P2 item: `chain_fusion_status` dashboard. New P3: chain-fusion-agent canister.
+- **Test suite**: Expanded from 64 to 78 tests (8 files).
+
 ## [0.3.0] - 2026-03-25
 
 ### Changed
