@@ -1,0 +1,5 @@
+service : {
+  mcp_server_info : () -> (text) query;
+  mcp_list_tools : () -> (text) query;
+  mcp_call_tool : (text) -> (text);
+}

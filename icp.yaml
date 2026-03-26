@@ -1,0 +1,8 @@
+canisters:
+  - name: chain-fusion-mcp
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: chain-fusion-mcp-canister
+        candid: canister/chain-fusion-mcp.did
+        shrink: true
