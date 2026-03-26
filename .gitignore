@@ -4,3 +4,5 @@ dist/
 *.pem
 *.log
 .gstack/
+canister/target/
+.DS_Store
