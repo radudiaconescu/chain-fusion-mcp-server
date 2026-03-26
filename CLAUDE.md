@@ -24,7 +24,7 @@ layer (ckBTC, ckETH, ckUSDC), and broadcast pre-signed transactions — without 
 ```bash
 npm install          # install deps
 npm run build        # tsc — must be clean before committing
-npm test             # vitest run — 64 tests
+npm test             # vitest run — 78 tests
 ```
 
 The server has no runtime URL to test against. QA = build + tests + smoke test.
@@ -147,5 +147,5 @@ ICP_NODE_URL=https://ic0.app      # optional override
 BTC_API_URL=https://mempool.space/api  # optional override (fee rates + broadcast only)
 CACHE_TTL_MS=10000                # optional, default 10s
 MCP_SSE_PORT=3000                 # required for SSE transport
-CYCLES_BUDGET_E8S=                # optional, parsed but not yet enforced
+CYCLES_BUDGET_E8S=                # optional, per-session cycles cap (enforced since v0.3.0)
 ```
