@@ -1,0 +1,25 @@
+[package]
+name = "chain-fusion-mcp-canister"
+version = "0.1.0"
+edition = "2021"
+description = "Chain Fusion MCP server as an ICP canister (read-only tools)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# icarus-cdk uses linkme::distributed_slice which is not supported on wasm32-unknown-unknown.
+# Using ic-cdk directly and implementing the MCP JSON-RPC protocol manually instead.
+ic-cdk = "0.18"
+candid = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Required for wasm32-unknown-unknown: getrandom must use the IC RNG
+getrandom = { version = "0.2", features = ["custom"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
